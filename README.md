@@ -18,6 +18,20 @@
 
 More updates will be added soon!
 
+## Parts List
+
+| Component                     | Description                                      |
+|-------------------------------|--------------------------------------------------|
+| **ESP32-C3 Super Mini**       | Microcontroller with Wi-Fi and Bluetooth support |
+| **SSD1306 128x64 OLED Display** | .96-inch screen for displaying information      |
+| **SD Card Module**            | Module for reading and writing SD cards         |
+| **PN532 RFID/NFC Module**     | Module for RFID/NFC reading and writing         |
+| **Push Buttons**              | 3 buttons for user interaction                   |
+| **Resistors**                 | 10kΩ resistors (optional)         |
+| **Breadboard**                | For prototyping connections                       |
+| **Jumper Wires**              | For making connections between components        |
+| **3V Power Supply**              | Suitable power source for the ESP32             |
+
 ## Wiring
 
 ### SD Card Module
