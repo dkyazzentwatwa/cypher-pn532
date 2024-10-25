@@ -1,6 +1,6 @@
 # CYPHER NFC
 ## A tiny ESP32 device that interacts with RFID + NFC devices using the PN532 chip.
-<img src="img/img.jpg" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img6.JPG" alt="RFID/NFC Module" width="500" height="600">
 
 - This project leverages the ESP32-C3 Super Mini microcontroller, featuring a robust setup with an SSD1306 128x64 OLED screen, an SD card module, three input buttons, and a PN532 RFID/NFC module.
 - The schematics and PCB files are available for you to create yourself!
@@ -52,5 +52,11 @@ More updates will be added soon!
 
 The code is under active development, with regular updates planned to enhance functionality and stability. Keep an eye on this repository for the latest improvements and feature additions.
 
+<img src="img/img.jpg" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img2.jpg" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img3.jpg" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img7.JPG" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img8.JPG" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img5.JPG" alt="RFID/NFC Module" width="500" height="600">
+
+
