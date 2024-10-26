@@ -13,6 +13,7 @@
 - **User Interface**: Navigate options with three buttons connected to the OLED screen.
 
 ## Future Features
+- **Improve menu flow and button handling***
 - **Save scans to SD card** : After reading RFID/NFC, save data to SD Card
 - **Write from SD card** : Enter write menu, select SD Card, & choose which data to write. 
 
@@ -32,6 +33,22 @@ More updates will be added soon!
 | **Breadboard**                | For prototyping connections                       |
 | **Jumper Wires**              | For making connections between components        |
 | **3V Power Supply**              | Suitable power source for the ESP32             |
+
+## Parts used to make this device:
+- **ESP32-C3 Super Mini**:
+https://amzn.to/3XtgL9G
+
+- **PN532 NFC/RFID Module**:
+https://amzn.to/3XqYQjN
+
+- **SSD1306 128x64 Screen**:
+https://amzn.to/3TqELJe
+
+- **SD Card Module**:
+https://amzn.to/3zsvJot
+
+- **Tactile Buttons**:
+https://amzn.to/4gripRD
 
 ## Wiring
 
