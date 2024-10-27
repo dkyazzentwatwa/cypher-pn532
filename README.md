@@ -8,7 +8,7 @@
 
 ## Current Features
 
-- **RFID/NFC Functionality**: Read and potentially write data using the PN532 module.
+- **RFID/NFC Functionality**: Read UUID, NDEF messges and potentially write data using the PN532 module.
 - **SD Card Operations**: Seamlessly read, load, and delete files on the SD card.
 - **User Interface**: Navigate options with three buttons connected to the OLED screen.
 
