@@ -779,7 +779,7 @@ bool readNFCDataFromSD(const char* filename, uint8_t* data, uint8_t* dataLength)
 
 
 void sdCardMenu() {
-  menuIndex = 0;  // Reset the menu index when entering the SD menu
+  SDmenuIndex = 0;  // Reset the menu index when entering the SD menu
   // Call this function periodically from the main loop
   displaySDMenuOptions();  // Show current menu
 
