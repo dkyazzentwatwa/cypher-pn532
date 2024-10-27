@@ -1,6 +1,6 @@
 # CYPHER NFC
 ## A tiny ESP32 device that interacts with RFID + NFC devices using the PN532 chip.
-<img src="img/img.jpg" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img6.JPG" alt="RFID/NFC Module" width="500" height="600">
 
 - This project leverages the ESP32-C3 Super Mini microcontroller, featuring a robust setup with an SSD1306 128x64 OLED screen, an SD card module, three input buttons, and a PN532 RFID/NFC module.
 - The schematics and PCB files are available for you to create yourself!
@@ -13,6 +13,7 @@
 - **User Interface**: Navigate options with three buttons connected to the OLED screen.
 
 ## Future Features
+- **Improve menu flow and button handling***
 - **Save scans to SD card** : After reading RFID/NFC, save data to SD Card
 - **Write from SD card** : Enter write menu, select SD Card, & choose which data to write. 
 
@@ -33,6 +34,22 @@ More updates will be added soon!
 | **Jumper Wires**              | For making connections between components        |
 | **3V Power Supply**              | Suitable power source for the ESP32             |
 
+## Parts used to make this device:
+- **ESP32-C3 Super Mini**:
+https://amzn.to/3XtgL9G
+
+- **PN532 NFC/RFID Module**:
+https://amzn.to/3XqYQjN
+
+- **SSD1306 128x64 Screen**:
+https://amzn.to/3TqELJe
+
+- **SD Card Module**:
+https://amzn.to/3zsvJot
+
+- **Tactile Buttons**:
+https://amzn.to/4gripRD
+
 ## Wiring
 
 ### SD Card Module
@@ -52,5 +69,11 @@ More updates will be added soon!
 
 The code is under active development, with regular updates planned to enhance functionality and stability. Keep an eye on this repository for the latest improvements and feature additions.
 
+<img src="img/img.jpg" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img2.jpg" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img3.jpg" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img7.JPG" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img8.JPG" alt="RFID/NFC Module" width="500" height="600">
+<img src="img/img5.JPG" alt="RFID/NFC Module" width="500" height="600">
+
+
