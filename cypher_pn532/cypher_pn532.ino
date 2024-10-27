@@ -35,14 +35,14 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 U8G2_FOR_ADAFRUIT_GFX u8g2_for_adafruit_gfx;
 Adafruit_PN532 nfc(PN532_IRQ, PN532_RESET);
 
-const char* menuItems[] = { "Read", "Read/Write", "Erase", "SD Card" };
+const char* menuItems[] = { "Read", "Read NDEF", "Read/Write", "Erase", "SD Card" };
 
 // Global state variables
 bool inMenu = true;
 bool inSDMenu = false;
 int currentMenuItem = 0;
 int currentSDMenuItem = 0;
-const int totalMenuItems = 4;
+const int totalMenuItems = 5;
 int menuIndex = 0;    // Tracks the current menu option
 int SDmenuIndex = 0;  // Tracks the current menu option
 
@@ -93,18 +93,63 @@ void displayMenu() {
   display.println("Menu");
   display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
 
-  for (int i = 0; i < totalMenuItems; i++) {
+  // Calculate which items to show based on current selection
+  int startIdx = 0;
+  if (currentMenuItem > 2) {
+    startIdx = currentMenuItem - 2;  // Keep selected item in middle when possible
+  }
+  if (startIdx + 4 > totalMenuItems) {
+    startIdx = totalMenuItems - 4;  // Adjust if near end of list
+  }
+  if (startIdx < 0) startIdx = 0;  // Safety check
+
+  // Display up to 4 menu items
+  for (int i = 0; i < 4 && (startIdx + i) < totalMenuItems; i++) {
     display.setCursor(4, 18 + i * 10);
-    if (i == currentMenuItem) {
+    if (startIdx + i == currentMenuItem) {
       display.print("> ");
     } else {
       display.print("  ");
     }
-    display.println(menuItems[i]);
+    display.println(menuItems[startIdx + i]);
+  }
+
+  // Optional: Add scroll indicators if there are more items
+  if (startIdx > 0) {
+    display.setCursor(120, 18);
+    display.print("^");  // Up arrow
+  }
+  if (startIdx + 4 < totalMenuItems) {
+    display.setCursor(120, 48);
+    display.print("v");  // Down arrow
   }
 
   display.display();
 }
+// Modified executeMenuItem() function
+void executeMenuItem() {
+  switch (currentMenuItem) {
+    case 0:  // Read
+      readCard();
+      break;
+    case 1:  // Read
+      readNDEF();
+      break;
+    case 2:  // Read/Write
+      readWriteCard();
+      break;
+    case 3:  // Erase
+      eraseCard();
+      break;
+    case 4:  // SD Card Menu
+      inSDMenu = true;
+      inMenu = false;
+      currentSDMenuItem = 0;
+      displaySDMenuOptions();
+      break;
+  }
+}
+
 
 void initSDCard() {
   displayInfo("SD Card", "Initializing...", "");
@@ -195,7 +240,7 @@ void initSDCard() {
 
   // Show file count
   Serial.println("SD Ready");
-  Serial.println(String(fileCount));
+  Serial.print(String(fileCount));
   Serial.print(" files found");
   displayInfo("SD Ready", String(fileCount) + " files", "found");
   delay(2000);
@@ -281,26 +326,6 @@ void handleButtonPress() {
   }
 }
 
-// Modified executeMenuItem() function
-void executeMenuItem() {
-  switch (currentMenuItem) {
-    case 0:  // Read
-      readCard();
-      break;
-    case 1:  // Read/Write
-      readWriteCard();
-      break;
-    case 2:  // Erase
-      eraseCard();
-      break;
-    case 3:  // SD Card Menu
-      inSDMenu = true;
-      inMenu = false;
-      currentSDMenuItem = 0;
-      displaySDMenuOptions();
-      break;
-  }
-}
 
 void readCard() {
   while (true) {  // Keep scanning in a loop
@@ -325,6 +350,11 @@ void readCard() {
           }
 
           displayInfo("TYPE / UID / LEN", cardTypeStr, uidStr, uidLen);
+          Serial.println("TYPE / UID / LEN");
+          Serial.println(cardTypeStr);
+          Serial.println(uidStr);
+          Serial.println(uidLen);
+
           delay(3000);
           cardRead = true;  // Set flag to indicate successful read
 
@@ -384,6 +414,206 @@ void readCard() {
     }
   }
 }
+
+void readNDEF() {
+  displayInfo("Read NDEF", "Place card", "near reader");
+  uint8_t success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+  bool cardRead = false;                    // Flag to indicate a successful read
+
+
+  // Wait for an NTAG203 card. When one is found, 'uid' will be populated with
+  // the UID, and uidLength will indicate the size of the UUID (normally 7 bytes)
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+  if (success) {
+    cardRead = true;  // Set flag to indicate a successful read
+    // Display card detection message
+    String uidLenStr = String(uidLength) + " bytes";
+    Serial.println("Found an ISO14443A card");
+    Serial.print("  UID Length: ");
+    Serial.print(uidLength, DEC);
+    Serial.println(" bytes");
+    displayInfo("Card Found", "UID Length:", uidLenStr);
+    delay(2000);
+    // Display UID value
+    Serial.print("  UID Value: ");
+    nfc.PrintHex(uid, uidLength);
+    Serial.println("");
+    String uidStr = "";
+    for (uint8_t i = 0; i < uidLength; i++) {
+      uidStr += String(uid[i], HEX) + " ";
+    }
+    displayInfo("UID Value", uidStr);
+    delay(2000);
+
+    if (uidLength == 4 || uidLength == 7) {
+      uint8_t data[32];
+      Serial.println("Seems to be an NTAG2xx tag (4-7 byte UID)");
+      displayInfo("Tag Type", "NTAG2xx detected");
+
+      // Attempt to read user pages for NTAG2xx card
+      for (uint8_t i = 0; i < 135; i++) {
+        success = nfc.ntag2xx_ReadPage(i, data);
+
+        // Display the current page number
+        String pageStr = "PAGE " + String(i < 10 ? "0" : "") + String(i);
+        Serial.print(pageStr + ": ");
+        displayInfo("Reading Page", pageStr);
+
+        // Display the results based on 'success'
+        if (success) {
+          // Dump the page data
+          nfc.PrintHexChar(data, 4);
+          String pageDataStr = "";
+          for (int j = 0; j < 4; j++) {
+            pageDataStr += String(data[j], HEX) + " ";
+          }
+          displayInfo(pageStr, pageDataStr);
+          delay(100);
+        } else {
+          Serial.println("Unable to read the requested page!");
+          displayInfo("Error", "Unable to read", "requested page");
+        }
+      }
+    } else {
+      Serial.println("This doesn't seem to be an NTAG203 tag (UUID length != 7 bytes)!");
+      displayInfo("Error", "Not NTAG203", "UID != 7 bytes");
+    }
+    // Delay and return to main menu
+    if (cardRead) {
+      delay(3000);  // Wait briefly before returning to main menu
+      displayInfo("Returning", "Main Menu", "Loading...");
+      displayMenu();  // Call main menu function
+    }
+  } else if (digitalRead(BUTTON_DOWN) == LOW) {
+    displayInfo("Returning", "Main Menu", "Loading...");
+    Serial.println("Returning to menu");
+    delay(2000);    // Wait briefly before returning to main menu
+    displayMenu();  // Call main menu function
+  }
+}
+void readNFCType4Tag() {
+  displayInfo("Read NFC", "Place NFC", "near reader");
+  uint8_t success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
+  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
+
+  // Wait for an NTAG203 card.  When one is found 'uid' will be populated with
+  // the UID, and uidLength will indicate the size of the UUID (normally 7)
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+
+  if (success) {
+    // Display some basic information about the card
+    displayInfo("Success!", "NFC TAG", "Detected");
+    Serial.println("Found an ISO14443A card");
+    Serial.print("  UID Length: ");
+    Serial.print(uidLength, DEC);
+    Serial.println(" bytes");
+    Serial.print("  UID Value: ");
+    nfc.PrintHex(uid, uidLength);
+    Serial.println("");
+
+    if (uidLength == 7) {
+      uint8_t data[32];
+
+      // We probably have an NTAG2xx card (though it could be Ultralight as well)
+      Serial.println("Seems to be an NTAG2xx tag (7 byte UID)");
+
+      // NTAG2x3 cards have 39*4 bytes of user pages (156 user bytes),
+      // starting at page 4 ... larger cards just add pages to the end of
+      // this range:
+
+      // See: http://www.nxp.com/documents/short_data_sheet/NTAG203_SDS.pdf
+
+      // TAG Type       PAGES   USER START    USER STOP
+      // --------       -----   ----------    ---------
+      // NTAG 203       42      4             39
+      // NTAG 213       45      4             39
+      // NTAG 215       135     4             129
+      // NTAG 216       231     4             225
+
+      for (uint8_t i = 0; i < 42; i++) {
+        success = nfc.ntag2xx_ReadPage(i, data);
+
+        // Display the current page number
+        Serial.print("PAGE ");
+        if (i < 10) {
+          Serial.print("0");
+          Serial.print(i);
+        } else {
+          Serial.print(i);
+        }
+        Serial.print(": ");
+
+        // Display the results, depending on 'success'
+        if (success) {
+          // Dump the page data
+          nfc.PrintHexChar(data, 4);
+        } else {
+          Serial.println("Unable to read the requested page!");
+        }
+      }
+    } else {
+      displayInfo("Failed", "Could not", "Communicate");
+
+      Serial.println("This doesn't seem to be an NTAG203 tag (UUID length != 7 bytes)!");
+    }
+
+    // Wait a bit before trying again
+    Serial.println("\n\nSend a character to scan another tag!");
+    Serial.flush();
+    while (!Serial.available())
+      ;
+    while (Serial.available()) {
+      Serial.read();
+    }
+    Serial.flush();
+  }
+}
+/*
+void readNFCType4Tag() {
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the UID
+  uint8_t uidLength;
+  displayInfo("Read NFC", "Place NFC", "near reader");
+
+  // Start scanning for an ISO14443A (Type A) card with a baud rate of 106 kbps
+  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000)) {
+    displayInfo("Success!", "NFC TAG", "Detected");
+    Serial.println("NFC Type 4 Tag Detected");
+
+    // Print the UID
+    Serial.print("UID Value: ");
+    for (uint8_t i = 0; i < uidLength; i++) {
+      Serial.print("0x");
+      Serial.print(uid[i], HEX);
+      Serial.print(" ");
+    }
+    Serial.println();
+
+    // Example APDU command for selecting an application
+    uint8_t command[] = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00 };
+    uint8_t response[32];
+    uint8_t responseLength;
+
+    // Use inDataExchange to send an APDU command and get a response
+    if (nfc.inDataExchange(command, sizeof(command), response, &responseLength)) {
+      Serial.println("Received response:");
+      for (int i = 0; i < responseLength; i++) {
+        Serial.print("0x");
+        Serial.print(response[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+    } else {
+      displayInfo("Failed", "Could not", "Communicate");
+
+      Serial.println("Failed to communicate with the Type 4 tag.");
+    }
+  }
+}
+*/
 void readWriteCard() {
   while (true) {
     displayInfo("Read/Write", "Place card", "near reader");
@@ -494,8 +724,8 @@ void eraseCard() {
 
 // Function to generate unique filename for NFC data
 void generateFileName(String& fileName) {
-  static int fileCounter = 0;                          // Static variable to keep track of file count
-  fileName = "nfc_" + String(fileCounter++) + ".txt";  // Create a unique file name
+  static int fileCounter = 0;  // Static variable to keep track of file count
+  fileName = "nfc.txt";        // Create a unique file name
 }
 
 bool saveNFCDataToSD(uint8_t* data, uint8_t dataLength) {
@@ -589,19 +819,39 @@ void displaySDMenuOptions() {
   display.println("SD Card");
   display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
 
-  for (int i = 0; i < totalMenuItems; i++) {
+  // Calculate which items to show based on current selection
+  int startIdx = 0;
+  if (currentSDMenuItem > 2) {
+    startIdx = currentSDMenuItem - 2;
+  }
+  if (startIdx + 4 > totalMenuItems) {
+    startIdx = totalMenuItems - 4;
+  }
+  if (startIdx < 0) startIdx = 0;
+
+  // Display up to 4 menu items
+  for (int i = 0; i < 4 && (startIdx + i) < totalMenuItems; i++) {
     display.setCursor(4, 18 + i * 10);
-    if (i == currentSDMenuItem) {
+    if (startIdx + i == currentSDMenuItem) {
       display.print("> ");
     } else {
       display.print("  ");
     }
-    display.println(sdMenuOptions[i]);
+    display.println(sdMenuOptions[startIdx + i]);
+  }
+
+  // Optional: Add scroll indicators if there are more items
+  if (startIdx > 0) {
+    display.setCursor(120, 18);
+    display.print("^");
+  }
+  if (startIdx + 4 < totalMenuItems) {
+    display.setCursor(120, 48);
+    display.print("v");
   }
 
   display.display();
 }
-
 
 int getButtonInput() {
   if (digitalRead(BUTTON_UP) == LOW) {
