@@ -26,6 +26,7 @@
 #define BUTTON_DOWN 1
 #define BUTTON_SELECT 2
 
+
 // Variables for NFC data handling
 const int MAX_NFC_DATA_SIZE = 16;  // Standard MIFARE Classic block size
 char currentFileName[13];          // 8.3 format filename buffer
@@ -415,13 +416,13 @@ void readCard() {
   }
 }
 
+
 void readNDEF() {
   displayInfo("Read NDEF", "Place card", "near reader");
   uint8_t success;
   uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
   uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
   bool cardRead = false;                    // Flag to indicate a successful read
-
 
   // Wait for an NTAG203 card. When one is found, 'uid' will be populated with
   // the UID, and uidLength will indicate the size of the UUID (normally 7 bytes)
@@ -443,83 +444,19 @@ void readNDEF() {
     Serial.println("");
     String uidStr = "";
     for (uint8_t i = 0; i < uidLength; i++) {
-      uidStr += String(uid[i], HEX) + " ";
+      String byteStr = String(uid[i], HEX);
+      if (byteStr.length() < 2) {
+        byteStr = "0" + byteStr;
+      }
+      uidStr += byteStr + " ";
     }
     displayInfo("UID Value", uidStr);
     delay(2000);
 
-    if (uidLength == 4 || uidLength == 7) {
-      uint8_t data[32];
-      Serial.println("Seems to be an NTAG2xx tag (4-7 byte UID)");
-      displayInfo("Tag Type", "NTAG2xx detected");
-
-      // Attempt to read user pages for NTAG2xx card
-      for (uint8_t i = 0; i < 135; i++) {
-        success = nfc.ntag2xx_ReadPage(i, data);
-
-        // Display the current page number
-        String pageStr = "PAGE " + String(i < 10 ? "0" : "") + String(i);
-        Serial.print(pageStr + ": ");
-        displayInfo("Reading Page", pageStr);
-
-        // Display the results based on 'success'
-        if (success) {
-          // Dump the page data
-          nfc.PrintHexChar(data, 4);
-          String pageDataStr = "";
-          for (int j = 0; j < 4; j++) {
-            pageDataStr += String(data[j], HEX) + " ";
-          }
-          displayInfo(pageStr, pageDataStr);
-          delay(100);
-        } else {
-          Serial.println("Unable to read the requested page!");
-          displayInfo("Error", "Unable to read", "requested page");
-        }
-      }
-    } else {
-      Serial.println("This doesn't seem to be an NTAG203 tag (UUID length != 7 bytes)!");
-      displayInfo("Error", "Not NTAG203", "UID != 7 bytes");
-    }
-    // Delay and return to main menu
-    if (cardRead) {
-      delay(3000);  // Wait briefly before returning to main menu
-      displayInfo("Returning", "Main Menu", "Loading...");
-      displayMenu();  // Call main menu function
-    }
-  } else if (digitalRead(BUTTON_DOWN) == LOW) {
-    displayInfo("Returning", "Main Menu", "Loading...");
-    Serial.println("Returning to menu");
-    delay(2000);    // Wait briefly before returning to main menu
-    displayMenu();  // Call main menu function
-  }
-}
-void readNFCType4Tag() {
-  displayInfo("Read NFC", "Place NFC", "near reader");
-  uint8_t success;
-  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the returned UID
-  uint8_t uidLength;                        // Length of the UID (4 or 7 bytes depending on ISO14443A card type)
-
-  // Wait for an NTAG203 card.  When one is found 'uid' will be populated with
-  // the UID, and uidLength will indicate the size of the UUID (normally 7)
-  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
-
-  if (success) {
-    // Display some basic information about the card
-    displayInfo("Success!", "NFC TAG", "Detected");
-    Serial.println("Found an ISO14443A card");
-    Serial.print("  UID Length: ");
-    Serial.print(uidLength, DEC);
-    Serial.println(" bytes");
-    Serial.print("  UID Value: ");
-    nfc.PrintHex(uid, uidLength);
-    Serial.println("");
-
     if (uidLength == 7) {
       uint8_t data[32];
-
-      // We probably have an NTAG2xx card (though it could be Ultralight as well)
       Serial.println("Seems to be an NTAG2xx tag (7 byte UID)");
+      displayInfo("Tag Type", "NTAG2xx detected");
 
       // NTAG2x3 cards have 39*4 bytes of user pages (156 user bytes),
       // starting at page 4 ... larger cards just add pages to the end of
@@ -538,27 +475,38 @@ void readNFCType4Tag() {
         success = nfc.ntag2xx_ReadPage(i, data);
 
         // Display the current page number
-        Serial.print("PAGE ");
+        String pageStr = "PAGE ";
         if (i < 10) {
-          Serial.print("0");
-          Serial.print(i);
-        } else {
-          Serial.print(i);
+          pageStr += "0";
         }
-        Serial.print(": ");
+        pageStr += String(i);
+        Serial.print(pageStr + ": ");
+        displayInfo("Reading Page", pageStr);
 
         // Display the results, depending on 'success'
         if (success) {
           // Dump the page data
           nfc.PrintHexChar(data, 4);
+          String pageDataStr = "";
+          for (int j = 0; j < 4; j++) {
+            String byteStr = String(data[j], HEX);
+            if (byteStr.length() < 2) {
+              byteStr = "0" + byteStr;
+            }
+            pageDataStr += byteStr + " ";
+          }
+          displayInfo(pageStr, pageDataStr);
+          delay(1000);  // Increased delay to see each page
         } else {
           Serial.println("Unable to read the requested page!");
+          displayInfo("Error", "Unable to read", "page " + String(i));
+          delay(2000);
         }
       }
     } else {
-      displayInfo("Failed", "Could not", "Communicate");
-
       Serial.println("This doesn't seem to be an NTAG203 tag (UUID length != 7 bytes)!");
+      displayInfo("Error", "Not NTAG203", "UID != 7 bytes");
+      delay(3000);
     }
 
     // Wait a bit before trying again
@@ -570,109 +518,464 @@ void readNFCType4Tag() {
       Serial.read();
     }
     Serial.flush();
+    if (cardRead) {
+      displayInfo("Returning", "Main Menu", "Loading...");
+      delay(2000);    // Wait briefly before returning to main menu
+      displayMenu();  // Call main menu function
+    }
+  } else if (digitalRead(BUTTON_DOWN) == LOW) {
+    displayInfo("Returning", "Main Menu", "Loading...");
+    Serial.println("Returning to menu");
+    delay(2000);    // Wait briefly before returning to main menu
+    displayMenu();  // Call main menu function
+  } else {
+    displayInfo("No Card", "Detected");
+    delay(1000);  // Give some time for the message to be displayed
   }
 }
+
+
+// Test code to send APDU Commands
 /*
-void readNFCType4Tag() {
-  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };  // Buffer to store the UID
+void readNDEF3() {
+  uint8_t success;
+  uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };
   uint8_t uidLength;
-  displayInfo("Read NFC", "Place NFC", "near reader");
 
-  // Start scanning for an ISO14443A (Type A) card with a baud rate of 106 kbps
-  if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength, 1000)) {
-    displayInfo("Success!", "NFC TAG", "Detected");
-    Serial.println("NFC Type 4 Tag Detected");
+  success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength);
+  delay(100);
 
-    // Print the UID
+  if (success) {
+    Serial.println("\nFound a card!");
+    Serial.print("UID Length: ");
+    Serial.print(uidLength, DEC);
+    Serial.println(" bytes");
     Serial.print("UID Value: ");
-    for (uint8_t i = 0; i < uidLength; i++) {
-      Serial.print("0x");
-      Serial.print(uid[i], HEX);
+    printHexArray(uid, uidLength);
+
+    delay(200);
+
+    if (!selectCard()) {
+      Serial.println("Failed to select card");
+      return;
+    }
+
+    // First select MF (Master File)
+    if (!selectFile(0x3F, 0x00)) {
+      Serial.println("Failed to select MF");
+      return;
+    }
+
+    // Try to select common AIDs (Application Identifiers)
+    // These are examples - you might need to use different AIDs depending on your card
+    const uint8_t commonAIDs[][2] = {
+      { 0x10, 0x01 },
+      { 0x10, 0x00 },
+      { 0xA0, 0x00 },
+      { 0x3F, 0x01 }
+    };
+
+    bool foundValidAID = false;
+
+    for (int i = 0; i < sizeof(commonAIDs) / sizeof(commonAIDs[0]); i++) {
+      Serial.print("Trying AID: ");
+      Serial.print(commonAIDs[i][0], HEX);
+      Serial.println(commonAIDs[i][1], HEX);
+
+      if (selectFile(commonAIDs[i][0], commonAIDs[i][1])) {
+        foundValidAID = true;
+        Serial.println("Successfully selected AID");
+
+        // Try to read the directory
+        readDirectory();
+        break;
+      }
+    }
+
+    if (!foundValidAID) {
+      Serial.println("Could not find a valid AID");
+    }
+  }
+}
+
+bool selectFile(uint8_t fid1, uint8_t fid2) {
+  uint8_t selectCmd[] = {
+    0x00,       // CLA
+    0xA4,       // INS (SELECT)
+    0x00,       // P1
+    0x00,       // P2
+    0x02,       // Lc
+    fid1, fid2  // File ID
+  };
+
+  uint8_t response[255];
+  uint8_t responseLength = 255;
+
+  if (sendApduWithRetry(selectCmd, sizeof(selectCmd), response, &responseLength)) {
+    if (responseLength >= 2) {
+      uint8_t sw1 = response[responseLength - 2];
+      uint8_t sw2 = response[responseLength - 1];
+
+      Serial.print("Select response SW1SW2: ");
+      if (sw1 < 0x10) Serial.print("0");
+      Serial.print(sw1, HEX);
+      if (sw2 < 0x10) Serial.print("0");
+      Serial.println(sw2, HEX);
+
+      return (sw1 == 0x90 && sw2 == 0x00);
+    }
+  }
+  return false;
+}
+
+void readDirectory() {
+  // First try to read directory information
+  uint8_t readBinary[] = {
+    0x00,  // CLA
+    0xB0,  // INS (READ BINARY)
+    0x00,  // P1
+    0x00,  // P2
+    0x00   // Le (length to read)
+  };
+
+  uint8_t response[255];
+  uint8_t responseLength = 255;
+
+  if (sendApduWithRetry(readBinary, sizeof(readBinary), response, &responseLength)) {
+    Serial.println("Directory content:");
+    printHexArray(response, responseLength - 2);
+
+    // Now try to read records
+    readRecords();
+  } else {
+    Serial.println("Failed to read directory. Trying records directly...");
+    readRecords();
+  }
+}
+
+void readRecords() {
+  uint8_t recordNumber = 1;
+  bool continueReading = true;
+
+  while (continueReading && recordNumber <= 255) {
+    uint8_t readRecord[] = {
+      0x00,          // CLA
+      0xB2,          // INS (READ RECORD)
+      recordNumber,  // P1: Record Number
+      0x04,          // P2: Reading method (0x04 = read record P1)
+      0x00           // Le: Expected length (0x00 = all available bytes)
+    };
+
+    uint8_t response[255];
+    uint8_t responseLength = 255;
+
+    Serial.print("\nReading record #");
+    Serial.println(recordNumber);
+
+    if (sendApduWithRetry(readRecord, sizeof(readRecord), response, &responseLength)) {
+      if (responseLength >= 2) {
+        uint8_t sw1 = response[responseLength - 2];
+        uint8_t sw2 = response[responseLength - 1];
+
+        Serial.print("SW1SW2: ");
+        if (sw1 < 0x10) Serial.print("0");
+        Serial.print(sw1, HEX);
+        if (sw2 < 0x10) Serial.print("0");
+        Serial.println(sw2, HEX);
+
+        if (sw1 == 0x90 && sw2 == 0x00) {
+          Serial.print("Record content: ");
+          printHexArray(response, responseLength - 2);
+
+          Serial.print("ASCII: ");
+          for (int i = 0; i < responseLength - 2; i++) {
+            if (isPrintable(response[i])) {
+              Serial.print((char)response[i]);
+            } else {
+              Serial.print('.');
+            }
+          }
+          Serial.println();
+        } else if (sw1 == 0x6A && sw2 == 0x83) {
+          Serial.println("No more records found");
+          continueReading = false;
+        } else {
+          Serial.print("Error reading record. SW1SW2: ");
+          if (sw1 < 0x10) Serial.print("0");
+          Serial.print(sw1, HEX);
+          if (sw2 < 0x10) Serial.print("0");
+          Serial.println(sw2, HEX);
+          continueReading = false;
+        }
+      }
+    } else {
+      Serial.println("Failed to read record");
+      continueReading = false;
+    }
+
+    recordNumber++;
+    delay(200);
+  }
+}
+
+bool selectCard() {
+  int retries = 3;
+  while (retries > 0) {
+    if (nfc.inListPassiveTarget()) {
+      Serial.println("Card selected successfully");
+      delay(200);
+      return true;
+    }
+    retries--;
+    delay(500);
+  }
+  return false;
+}
+
+bool sendApduWithRetry(uint8_t* apdu, uint8_t apduLength, uint8_t* response, uint8_t* responseLength) {
+  int retries = 3;
+  bool success = false;
+
+  while (retries > 0 && !success) {
+    Serial.print("\nSending APDU (tries remaining: ");
+    Serial.print(retries);
+    Serial.println(")");
+
+    // Print APDU being sent
+    Serial.print("APDU: ");
+    for (int i = 0; i < apduLength; i++) {
+      if (apdu[i] < 0x10) Serial.print("0");
+      Serial.print(apdu[i], HEX);
       Serial.print(" ");
     }
     Serial.println();
 
-    // Example APDU command for selecting an application
-    uint8_t command[] = { 0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01, 0x00 };
-    uint8_t response[32];
-    uint8_t responseLength;
+    delay(100);  // Delay before sending
+    success = nfc.inDataExchange(apdu, apduLength, response, responseLength);
+    delay(200);  // Delay after sending
 
-    // Use inDataExchange to send an APDU command and get a response
-    if (nfc.inDataExchange(command, sizeof(command), response, &responseLength)) {
-      Serial.println("Received response:");
-      for (int i = 0; i < responseLength; i++) {
-        Serial.print("0x");
-        Serial.print(response[i], HEX);
-        Serial.print(" ");
+    if (success) {
+      Serial.println("APDU sent successfully");
+      if (*responseLength >= 2) {
+        uint8_t sw1 = response[*responseLength - 2];
+        uint8_t sw2 = response[*responseLength - 1];
+        Serial.print("Status Words: ");
+        if (sw1 < 0x10) Serial.print("0");
+        Serial.print(sw1, HEX);
+        if (sw2 < 0x10) Serial.print("0");
+        Serial.println(sw2, HEX);
+
+        // Check if we need to retry based on status words
+        if (sw1 == 0x6F || sw1 == 0x6A) {
+          success = false;
+          Serial.println("Received error status, will retry");
+        }
       }
-      Serial.println();
     } else {
-      displayInfo("Failed", "Could not", "Communicate");
+      Serial.println("Failed to send APDU");
+    }
 
-      Serial.println("Failed to communicate with the Type 4 tag.");
+    if (!success) {
+      retries--;
+      if (retries > 0) {
+        delay(500);  // Longer delay between retries
+      }
+    }
+  }
+
+  return success;
+}
+
+void printHexArray(uint8_t* data, uint8_t length) {
+  for (uint8_t i = 0; i < length; i++) {
+    if (data[i] < 0x10) Serial.print("0");
+    Serial.print(data[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println();
+}
+/*
+void readRecords() {
+  // Read Record APDU template
+  uint8_t readRecord[] = {
+    0x00, // CLA
+    0xB2, // INS (READ RECORD)
+    0x01, // P1 (Record Number)
+    0x04, // P2 (SFI)
+    0x00  // Le (Expected length)
+  };
+  
+  uint8_t response[255];
+  uint8_t responseLength;
+  
+  // Try reading first few records
+  for (uint8_t record = 1; record <= 3; record++) {
+    readRecord[2] = record; // Set record number
+    
+    Serial.print("\nReading record "); 
+    Serial.println(record);
+    
+    if (sendApdu(readRecord, sizeof(readRecord), response, &responseLength)) {
+      Serial.print("Record "); 
+      Serial.print(record);
+      Serial.println(" contents:");
+      printHexArray(response, responseLength);
+      
+      // Parse and print readable content
+      parseRecord(response, responseLength);
+    } else {
+      break; // Stop if reading fails
     }
   }
 }
+
+void parseRecord(uint8_t *data, uint8_t length) {
+  Serial.println("Parsed data:");
+  
+  // Check for text data
+  bool isText = true;
+  for (int i = 0; i < length - 2; i++) { // -2 to skip status words
+    if (data[i] < 32 || data[i] > 126) {
+      isText = false;
+      break;
+    }
+  }
+  
+  if (isText) {
+    Serial.print("Text: ");
+    for (int i = 0; i < length - 2; i++) {
+      Serial.print((char)data[i]);
+    }
+    Serial.println();
+  } else {
+    // Try to identify record type based on first few bytes
+    if (length > 2) {
+      switch (data[0]) {
+        case 0x6F:
+          Serial.println("FCI Template");
+          break;
+        case 0x77:
+          Serial.println("Proprietary Template");
+          break;
+        case 0x70:
+          Serial.println("Record Template");
+          break;
+        default:
+          Serial.println("Unknown record type");
+      }
+    }
+  }
+  
+  // Print status words
+  if (length >= 2) {
+    Serial.print("Status Words: ");
+    if (data[length-2] < 0x10) Serial.print("0");
+    Serial.print(data[length-2], HEX);
+    if (data[length-1] < 0x10) Serial.print("0");
+    Serial.println(data[length-1], HEX);
+  }
+}
 */
+
+
 void readWriteCard() {
   while (true) {
     displayInfo("Read/Write", "Place card", "near reader");
     uint8_t uid[] = { 0, 0, 0, 0, 0, 0, 0 };
     uint8_t uidLength;
     bool cardRead = false;
+    uint8_t blockNumber = 4;  // Define the block number we are working with
+
 
     // First phase: Read card and authenticate
     while (!cardRead) {
       if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength)) {
         String uidStr = "";
         for (uint8_t i = 0; i < uidLength; i++) {
-          uidStr += String(uid[i], HEX) + " ";
+          String byteStr = String(uid[i], HEX);
+          if (byteStr.length() < 2) {
+            byteStr = "0" + byteStr;
+          }
+          uidStr += byteStr + " ";
         }
         displayInfo("Card Found!", "Authenticating", "...");
-        delay(3000);
+        Serial.print("UID: ");
+        Serial.println(uidStr);
+        delay(1000);
 
-        // Authenticate with default key
+        // Authenticate with default key for block 4 (sector 1)
         uint8_t keya[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
-        if (!nfc.mifareclassic_AuthenticateBlock(uid, uidLength, 4, 0, keya)) {
+        uint8_t sector = 1;  // Sector containing block 4
+        uint8_t blockNumber = 4;
+        if (!nfc.mifareclassic_AuthenticateBlock(uid, uidLength, blockNumber, 0, keya)) {
           displayInfo("Auth Failed!", "Check card", "and key");
+          Serial.println("Authentication failed for block " + String(blockNumber));
           delay(2000);
-          continue;
+          break;  // Exit inner loop to try reading again
+        } else {
+          Serial.println("Authentication successful for block " + String(blockNumber));
         }
 
         // Read current data from block 4
         uint8_t currentData[16];
-        if (nfc.mifareclassic_ReadDataBlock(4, currentData)) {
+        if (nfc.mifareclassic_ReadDataBlock(blockNumber, currentData)) {
+          Serial.print("Current data on block " + String(blockNumber) + ": ");
+          for (int i = 0; i < 16; i++) {
+            Serial.print((char)currentData[i]);
+          }
+          Serial.println();
           displayInfo("Current Data", "Read Success", "Preparing write");
           delay(2000);
           cardRead = true;
         } else {
           displayInfo("Read Failed", "Please try", "again");
+          Serial.println("Failed to read block " + String(blockNumber));
           delay(2000);
-          continue;
+          break;  // Exit inner loop to try reading again
         }
       } else {
         displayInfo("Waiting...", "Place card", "near reader");
-        delay(250);  // Reduced delay for better responsiveness
+        delay(250);
       }
     }
 
-    // Second phase: Write new data
-    displayInfo("Writing", "New Data", "...");
-    uint8_t newData[16] = { 'O', 'P', 'E', 'N', 'A', 'I', '-', 'N', 'F', 'C', '!', '!', '!', '!', '!', 0 };
-
-    // Attempt write without erasing first (erase not always necessary)
-    if (!nfc.mifareclassic_WriteDataBlock(4, newData)) {
-      displayInfo("Write Failed!", "Try again", "");
-      delay(2000);
-      continue;
+    if (!cardRead) {
+      continue;  // Go back to the beginning of the outer loop if card wasn't read
     }
 
-    // Third phase: Verify the write
-    uint8_t verifyData[16];
-    if (!nfc.mifareclassic_ReadDataBlock(4, verifyData)) {
-      displayInfo("Verify Failed!", "Cannot read", "Try again");
+    // Second phase: Write new data to block 4
+    displayInfo("Writing", "New Data", "...");
+    uint8_t newData[16] = { 'O', 'P', 'E', 'N', 'A', 'I', '-', 'N', 'F', 'C', '!', '!', '!', '!', '!', 0 };
+    Serial.print("Writing data to block " + String(blockNumber) + ": ");
+    for (int i = 0; i < 16; i++) {
+      Serial.print((char)newData[i]);
+    }
+    Serial.println();
+
+    if (!nfc.mifareclassic_WriteDataBlock(blockNumber, newData)) {
+      displayInfo("Write Failed!", "Try again", "");
+      Serial.println("Failed to write to block " + String(blockNumber));
       delay(2000);
-      continue;
+      continue;  // Go back to the beginning of the outer loop
+    } else {
+      Serial.println("Write successful to block " + String(blockNumber));
+      displayInfo("Write Success!", "Verifying...", "");
+      delay(1000);
+    }
+
+    // Third phase: Verify the write by reading block 4 again
+    uint8_t verifyData[16];
+    if (!nfc.mifareclassic_ReadDataBlock(blockNumber, verifyData)) {
+      displayInfo("Verify Failed!", "Cannot read", "Try again");
+      Serial.println("Failed to read block " + String(blockNumber) + " for verification");
+      delay(2000);
+      continue;  // Go back to the beginning of the outer loop
+    } else {
+      Serial.print("Data read for verification from block " + String(blockNumber) + ": ");
+      for (int i = 0; i < 16; i++) {
+        Serial.print((char)verifyData[i]);
+      }
+      Serial.println();
     }
 
     // Compare written data
@@ -686,12 +989,14 @@ void readWriteCard() {
 
     if (writeVerified) {
       displayInfo("Success!", "Write", "Verified");
+      Serial.println("Write verified successfully!");
       delay(3000);
       break;  // Exit the main loop on success
     } else {
       displayInfo("Verify Failed!", "Data mismatch", "Try again");
+      Serial.println("Verification failed. Data mismatch!");
       delay(2000);
-      continue;
+      continue;  // Go back to the beginning of the outer loop
     }
   }
 
