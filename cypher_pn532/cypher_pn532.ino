@@ -63,7 +63,7 @@ enum AppState {
 };
 
 enum CardType {
-  CARD_UNKNOWN,
+  CARD_NFC_UNKNOWN,
   CARD_MIFARE_CLASSIC_1K,
   CARD_MIFARE_CLASSIC_4K,
   CARD_MIFARE_ULTRALIGHT,
@@ -619,9 +619,9 @@ CardType detectCardType(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
     return info->type;
   }
 
-  info->type = CARD_UNKNOWN;
+  info->type = CARD_NFC_UNKNOWN;
   strncpy(info->typeName, "Unknown", sizeof(info->typeName));
-  return CARD_UNKNOWN;
+  return CARD_NFC_UNKNOWN;
 }
 
 void scanAndInfo() {

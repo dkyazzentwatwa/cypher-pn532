@@ -92,7 +92,7 @@ MAIN MENU
 
 1. **Clone or download** this repository
 2. **Install libraries** via Arduino IDE Library Manager (Sketch → Include Library → Manage Libraries)
-3. **Select board**: Tools → Board → esp32 → "ESP32-C3"
+3. **Select board**: Tools → Board → ESP32 Arduino → **XIAO_ESP32C3**
 4. **Set upload speed**: Tools → Upload Speed → 115200
 5. **Connect ESP32-C3** via USB cable to your computer
 6. **Select port**: Tools → Port → (your USB port)

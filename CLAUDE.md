@@ -19,7 +19,7 @@ Cypher PN532 is an Arduino firmware for an ESP32-C3 Super Mini-based NFC/RFID ha
 
 ## Build & Flash
 
-Open `cypher_pn532/cypher_pn532.ino` in Arduino IDE 2.x. Select board: **ESP32C3 Dev Module**.
+Open `cypher_pn532/cypher_pn532.ino` in Arduino IDE 2.x. Select board: **XIAO_ESP32C3** (Tools → Board → ESP32 Arduino → XIAO_ESP32C3). FQBN: `esp32:esp32:XIAO_ESP32C3`.
 
 Required libraries (install via Library Manager):
 - `Adafruit PN532`
