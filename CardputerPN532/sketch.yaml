@@ -1,0 +1,10 @@
+profiles:
+  adv:
+    fqbn: m5stack:esp32:m5stack_cardputer:FlashSize=8M,PartitionScheme=default_8MB,CDCOnBoot=cdc,USBMode=hwcdc
+    platforms:
+      - platform: m5stack:esp32
+        platform_index_url: https://static-cdn.m5stack.com/resource/arduino/package_m5stack_index.json
+    libraries:
+      - M5Cardputer (1.1.1)
+      - M5Unified (0.2.14)
+      - M5GFX (0.2.20)

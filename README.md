@@ -80,6 +80,38 @@ MAIN MENU
 
 ## Building & Flashing
 
+### M5Stack Cardputer ADV Port
+
+This repo also includes an isolated Cardputer ADV port at
+`CardputerPN532/CardputerPN532.ino`. It keeps the original ESP32-C3 sketch
+unchanged and is intended for Cypher OS packaging.
+
+Build it with Arduino CLI:
+
+```bash
+arduino-cli compile --profile adv CardputerPN532
+```
+
+For Cypher OS, the sibling launcher repo builds it as `cypher-pn532.bin` and
+installs it from `/cypher-puter/apps`.
+
+Cardputer EXT wiring:
+
+| PN532 | Cardputer ADV EXT |
+| --- | --- |
+| VCC | pin 6 `5VOUT` |
+| GND | pin 4 `GND` |
+| SDA | pin 8 `G8 / I2C_SDA` |
+| SCL | pin 10 `G9 / I2C_SCL` |
+
+Leave PN532 `RESET`, `INT`, and `BUSY` unconnected. Do not use EXT pin 2
+`5VIN` to power the module.
+
+Cardputer runtime files live under `/cypher-pn532/` on the SD card. Optional
+NDEF presets can be placed at `/cypher-pn532/NDEF_URL.TXT` and
+`/cypher-pn532/NDEF_TXT.TXT`; the port also falls back to root-level preset
+files for compatibility with the original sketch.
+
 ### Requirements
 - **Arduino IDE 2.x** (https://www.arduino.cc/en/software)
 - **ESP32 Board Support** installed (via Arduino IDE → Boards Manager, search "esp32", install latest)
@@ -261,5 +293,4 @@ Key improvements in v2.0:
 <img src="img/img7.JPG" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img8.JPG" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img5.JPG" alt="RFID/NFC Module" width="500" height="600">
-
 
