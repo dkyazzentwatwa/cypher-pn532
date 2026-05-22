@@ -19,6 +19,8 @@
 #include <M5Cardputer.h>
 #include <SD.h>
 #include <SPI.h>
+#include <WebServer.h>
+#include <WiFi.h>
 #if __has_include(<CypherPuterReturn.h>)
 #include <CypherPuterReturn.h>
 #endif
@@ -64,6 +66,13 @@ static constexpr uint8_t MIFARE_ULTRALIGHT_CMD_WRITE = 0xA2;
 
 static constexpr uint32_t SERIAL_BAUD = 115200;
 static constexpr const char* APP_DIR = "/cypher-pn532";
+static constexpr const char* WEB_AP_SSID = "CYPHER-PN532";
+static constexpr const char* WEB_AP_PASS = "cypher532";
+static const IPAddress WEB_AP_IP(192, 168, 4, 1);
+static const IPAddress WEB_AP_GATEWAY(192, 168, 4, 1);
+static const IPAddress WEB_AP_SUBNET(255, 255, 255, 0);
+static constexpr uint8_t PN532_BOOT_ATTEMPTS = 3;
+static constexpr uint8_t PN532_READ_FAIL_LIMIT = 4;
 
 enum ButtonInput {
   BUTTON_NONE = 0,
@@ -117,26 +126,59 @@ class M5Pn532 {
  public:
   bool begin() {
     delay(80);
-    SAMConfig();
-    return true;
+    return SAMConfig();
+  }
+
+  bool recoverBus() {
+    M5Cardputer.In_I2C.stop();
+    M5Cardputer.In_I2C.release();
+    delay(20);
+    bool ok = M5Cardputer.In_I2C.begin();
+    delay(20);
+    ok = ok && M5Cardputer.In_I2C.scanID(PN532_I2C_ADDRESS, PN532_I2C_FREQ);
+    transportFault_ = !ok;
+    return ok;
+  }
+
+  bool probe() {
+    bool ok = M5Cardputer.In_I2C.scanID(PN532_I2C_ADDRESS, PN532_I2C_FREQ);
+    if (!ok) transportFault_ = true;
+    return ok;
+  }
+
+  bool hadTransportFault() const {
+    return transportFault_;
+  }
+
+  void clearFault() {
+    transportFault_ = false;
   }
 
   bool SAMConfig() {
+    clearFault();
     packet_[0] = PN532_COMMAND_SAMCONFIGURATION;
     packet_[1] = 0x01;
     packet_[2] = 0x14;
     packet_[3] = 0x00;  // IRQ disabled; this port polls the I2C ready byte.
     if (!sendCommandCheckAck(packet_, 4)) return false;
-    readdata(packet_, 9);
-    return packet_[6] == 0x15;
+    if (!readdata(packet_, 9)) return false;
+    if (packet_[6] != 0x15) {
+      noteFault();
+      return false;
+    }
+    return true;
   }
 
   uint32_t getFirmwareVersion() {
+    clearFault();
     packet_[0] = PN532_COMMAND_GETFIRMWAREVERSION;
     if (!sendCommandCheckAck(packet_, 1)) return 0;
-    readdata(packet_, 13);
+    if (!readdata(packet_, 13)) return 0;
     const uint8_t expected[] = {0x00, 0x00, 0xFF, 0x06, 0xFA, 0xD5};
-    if (memcmp(packet_, expected, sizeof(expected)) != 0) return 0;
+    if (memcmp(packet_, expected, sizeof(expected)) != 0) {
+      noteFault();
+      return 0;
+    }
 
     uint32_t response = packet_[7];
     response <<= 8;
@@ -149,6 +191,7 @@ class M5Pn532 {
   }
 
   bool setPassiveActivationRetries(uint8_t maxRetries) {
+    clearFault();
     packet_[0] = PN532_COMMAND_RFCONFIGURATION;
     packet_[1] = 5;
     packet_[2] = 0xFF;
@@ -159,12 +202,13 @@ class M5Pn532 {
 
   bool readPassiveTargetID(uint8_t cardbaudrate, uint8_t* uid, uint8_t* uidLength,
                            uint16_t timeout = 120) {
+    clearFault();
     packet_[0] = PN532_COMMAND_INLISTPASSIVETARGET;
     packet_[1] = 1;
     packet_[2] = cardbaudrate;
-    if (!sendCommandCheckAck(packet_, 3, timeout)) return false;
+    if (!sendCommandCheckAck(packet_, 3, timeout, false)) return false;
 
-    readdata(packet_, 20);
+    if (!readdata(packet_, 20)) return false;
     if (packet_[0] != 0 || packet_[1] != 0 || packet_[2] != 0xFF) return false;
     if (packet_[5] != PN532_PN532TOHOST || packet_[6] != PN532_RESPONSE_INLISTPASSIVETARGET) return false;
     if (packet_[7] != 1) return false;
@@ -177,18 +221,28 @@ class M5Pn532 {
 
   bool inDataExchange(uint8_t* send, uint8_t sendLength, uint8_t* response,
                       uint8_t* responseLength) {
+    clearFault();
     if (sendLength > PN532_PACKBUFFSIZ - 2) return false;
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = inListedTag_;
     memcpy(packet_ + 2, send, sendLength);
     if (!sendCommandCheckAck(packet_, sendLength + 2, 1000)) return false;
-    if (!waitready(1000)) return false;
-    readdata(packet_, sizeof(packet_));
+    if (!waitready(1000, true)) return false;
+    if (!readdata(packet_, sizeof(packet_))) return false;
 
-    if (packet_[0] != 0 || packet_[1] != 0 || packet_[2] != 0xFF) return false;
+    if (packet_[0] != 0 || packet_[1] != 0 || packet_[2] != 0xFF) {
+      noteFault();
+      return false;
+    }
     uint8_t length = packet_[3];
-    if (packet_[4] != (uint8_t)(~length + 1)) return false;
-    if (packet_[5] != PN532_PN532TOHOST || packet_[6] != PN532_RESPONSE_INDATAEXCHANGE) return false;
+    if (packet_[4] != (uint8_t)(~length + 1)) {
+      noteFault();
+      return false;
+    }
+    if (packet_[5] != PN532_PN532TOHOST || packet_[6] != PN532_RESPONSE_INDATAEXCHANGE) {
+      noteFault();
+      return false;
+    }
     if ((packet_[7] & 0x3F) != 0) return false;
 
     length -= 3;
@@ -201,6 +255,7 @@ class M5Pn532 {
   uint8_t mifareclassic_AuthenticateBlock(uint8_t* uid, uint8_t uidLen,
                                           uint32_t blockNumber, uint8_t keyNumber,
                                           uint8_t* keyData) {
+    clearFault();
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = 1;
     packet_[2] = keyNumber ? MIFARE_CMD_AUTH_B : MIFARE_CMD_AUTH_A;
@@ -208,23 +263,25 @@ class M5Pn532 {
     memcpy(packet_ + 4, keyData, 6);
     memcpy(packet_ + 10, uid, uidLen);
     if (!sendCommandCheckAck(packet_, 10 + uidLen)) return 0;
-    readdata(packet_, 12);
+    if (!readdata(packet_, 12)) return 0;
     return packet_[7] == 0x00;
   }
 
   uint8_t mifareclassic_ReadDataBlock(uint8_t blockNumber, uint8_t* data) {
+    clearFault();
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = 1;
     packet_[2] = MIFARE_CMD_READ;
     packet_[3] = blockNumber;
     if (!sendCommandCheckAck(packet_, 4)) return 0;
-    readdata(packet_, 26);
+    if (!readdata(packet_, 26)) return 0;
     if (packet_[7] != 0x00) return 0;
     memcpy(data, packet_ + 8, 16);
     return 1;
   }
 
   uint8_t mifareclassic_WriteDataBlock(uint8_t blockNumber, uint8_t* data) {
+    clearFault();
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = 1;
     packet_[2] = MIFARE_CMD_WRITE;
@@ -232,24 +289,26 @@ class M5Pn532 {
     memcpy(packet_ + 4, data, 16);
     if (!sendCommandCheckAck(packet_, 20)) return 0;
     delay(10);
-    readdata(packet_, 26);
+    if (!readdata(packet_, 26)) return 0;
     return packet_[7] == 0x00;
   }
 
   uint8_t ntag2xx_ReadPage(uint8_t page, uint8_t* buffer) {
+    clearFault();
     if (page >= 231) return 0;
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = 1;
     packet_[2] = MIFARE_CMD_READ;
     packet_[3] = page;
     if (!sendCommandCheckAck(packet_, 4)) return 0;
-    readdata(packet_, 26);
+    if (!readdata(packet_, 26)) return 0;
     if (packet_[7] != 0x00) return 0;
     memcpy(buffer, packet_ + 8, 4);
     return 1;
   }
 
   uint8_t ntag2xx_WritePage(uint8_t page, uint8_t* data) {
+    clearFault();
     if (page < 4 || page > 225) return 0;
     packet_[0] = PN532_COMMAND_INDATAEXCHANGE;
     packet_[1] = 1;
@@ -258,18 +317,76 @@ class M5Pn532 {
     memcpy(packet_ + 4, data, 4);
     if (!sendCommandCheckAck(packet_, 8)) return 0;
     delay(10);
-    readdata(packet_, 26);
+    if (!readdata(packet_, 26)) return 0;
     return packet_[7] == 0x00;
   }
 
+  // ---- Target mode (card emulation) ----
+  // Present as a passive ISO14443A (Type 2 / NTAG) target. Returns true once a
+  // reader activates us. MIFARE Classic emulation is NOT supported by the chip.
+  bool tgInitAsTarget(const uint8_t* uid3, uint16_t timeout) {
+    clearFault();
+    uint8_t cmd[37];
+    int i = 0;
+    cmd[i++] = 0x8C;                       // TgInitAsTarget
+    cmd[i++] = 0x05;                       // Mode: PICC-only + passive-only
+    cmd[i++] = 0x04; cmd[i++] = 0x00;      // SENS_RES (ATQA)
+    cmd[i++] = uid3[0]; cmd[i++] = uid3[1]; cmd[i++] = uid3[2];  // NFCID1t
+    cmd[i++] = 0x00;                       // SEL_RES (SAK) 0x00 = Type 2
+    static const uint8_t fel[18] = {
+      0x01, 0xFE, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+      0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xFF, 0xFF };
+    memcpy(cmd + i, fel, 18); i += 18;
+    for (int k = 0; k < 10; k++) cmd[i++] = (k == 0) ? 0xAA : 0x00;  // NFCID3t
+    cmd[i++] = 0x00;                       // length of general bytes
+    cmd[i++] = 0x00;                       // length of historical bytes
+    if (!sendCommandCheckAck(cmd, i, timeout, false)) return false;
+    if (!waitready(timeout, false)) return false;
+    return readdata(packet_, 32);          // mode byte + initiator command
+  }
+
+  // TgGetData (0x86): read the reader's command. Returns payload length or -1.
+  int tgGetData(uint8_t* buf, uint8_t maxLen, uint16_t timeout) {
+    clearFault();
+    packet_[0] = 0x86;
+    if (!sendCommandCheckAck(packet_, 1, timeout, false)) return -1;
+    if (!waitready(timeout, false)) return -1;
+    if (!readdata(packet_, sizeof(packet_))) return -1;
+    if (packet_[0] != 0 || packet_[1] != 0 || packet_[2] != 0xFF) return -1;
+    uint8_t len = packet_[3];
+    if (packet_[5] != PN532_PN532TOHOST || packet_[6] != 0x87) return -1;
+    if (packet_[7] & 0x3F) return -1;      // status: RF error / field lost
+    int dataLen = (int)len - 3;            // exclude TFI + response code + status
+    if (dataLen < 0) dataLen = 0;
+    if (dataLen > maxLen) dataLen = maxLen;
+    memcpy(buf, packet_ + 8, dataLen);
+    return dataLen;
+  }
+
+  // TgSetData (0x8E): send our response payload back to the reader.
+  bool tgSetData(const uint8_t* data, uint8_t len, uint16_t timeout) {
+    clearFault();
+    packet_[0] = 0x8E;
+    if (len > PN532_PACKBUFFSIZ - 1) len = PN532_PACKBUFFSIZ - 1;
+    memcpy(packet_ + 1, data, len);
+    if (!sendCommandCheckAck(packet_, len + 1, timeout, false)) return false;
+    if (!waitready(timeout, false)) return false;
+    return readdata(packet_, 9);
+  }
+
  private:
-  bool sendCommandCheckAck(uint8_t* cmd, uint8_t cmdlen, uint16_t timeout = 1000) {
-    writecommand(cmd, cmdlen);
+  void noteFault() {
+    transportFault_ = true;
+  }
+
+  bool sendCommandCheckAck(uint8_t* cmd, uint8_t cmdlen, uint16_t timeout = 1000,
+                           bool timeoutIsFault = true) {
+    if (!writecommand(cmd, cmdlen)) return false;
     delay(1);
-    if (!waitready(timeout)) return false;
+    if (!waitready(timeout, timeoutIsFault)) return false;
     if (!readack()) return false;
     delay(1);
-    return waitready(timeout);
+    return waitready(timeout, timeoutIsFault);
   }
 
   bool isready() {
@@ -278,10 +395,13 @@ class M5Pn532 {
     return rdy == PN532_I2C_READY;
   }
 
-  bool waitready(uint16_t timeout) {
+  bool waitready(uint16_t timeout, bool timeoutIsFault = true) {
     uint32_t start = millis();
     while (!isready()) {
-      if (timeout != 0 && millis() - start > timeout) return false;
+      if (timeout != 0 && millis() - start > timeout) {
+        if (timeoutIsFault) noteFault();
+        return false;
+      }
       M5Cardputer.update();
       delay(10);
     }
@@ -291,21 +411,30 @@ class M5Pn532 {
   bool readack() {
     uint8_t ack[6];
     static const uint8_t expected[] = {0x00, 0x00, 0xFF, 0x00, 0xFF, 0x00};
-    readdata(ack, sizeof(ack));
-    return memcmp(ack, expected, sizeof(expected)) == 0;
+    if (!readdata(ack, sizeof(ack))) return false;
+    bool ok = memcmp(ack, expected, sizeof(expected)) == 0;
+    if (!ok) noteFault();
+    return ok;
   }
 
-  void readdata(uint8_t* buff, uint8_t n) {
+  bool readdata(uint8_t* buff, uint8_t n) {
     uint8_t raw[PN532_PACKBUFFSIZ + 1] = {0};
     if (n > PN532_PACKBUFFSIZ) n = PN532_PACKBUFFSIZ;
     if (!readBytes(raw, n + 1)) {
       memset(buff, 0, n);
-      return;
+      noteFault();
+      return false;
+    }
+    if (raw[0] != PN532_I2C_READY) {
+      memset(buff, 0, n);
+      noteFault();
+      return false;
     }
     memcpy(buff, raw + 1, n);
+    return true;
   }
 
-  void writecommand(uint8_t* cmd, uint8_t cmdlen) {
+  bool writecommand(uint8_t* cmd, uint8_t cmdlen) {
     uint8_t packet[8 + PN532_PACKBUFFSIZ] = {0};
     if (cmdlen > PN532_PACKBUFFSIZ) cmdlen = PN532_PACKBUFFSIZ;
     const uint8_t len = cmdlen + 1;
@@ -322,7 +451,11 @@ class M5Pn532 {
     }
     packet[6 + cmdlen] = ~sum + 1;
     packet[7 + cmdlen] = PN532_POSTAMBLE;
-    writeBytes(packet, 8 + cmdlen);
+    if (!writeBytes(packet, 8 + cmdlen)) {
+      noteFault();
+      return false;
+    }
+    return true;
   }
 
   bool readBytes(uint8_t* data, size_t len) {
@@ -339,11 +472,16 @@ class M5Pn532 {
 
   uint8_t packet_[PN532_PACKBUFFSIZ] = {0};
   uint8_t inListedTag_ = 1;
+  bool transportFault_ = false;
 };
 
 // --- Global Objects ---
 CardputerDisplayCompat display;
 M5Pn532 nfc;
+WebServer webServer(80);
+bool pn532Ready = false;
+bool sdReady = false;
+uint32_t pn532FirmwareVersion = 0;
 
 // ============================================================
 // ENUMS
@@ -355,7 +493,9 @@ enum AppState {
   STATE_ATTACK_SUBMENU,
   STATE_CLONE_SUBMENU,
   STATE_WRITE_SUBMENU,
-  STATE_SD_SUBMENU
+  STATE_SD_SUBMENU,
+  STATE_DEMO_SUBMENU,
+  STATE_EMULATE_SUBMENU
 };
 
 enum CardType {
@@ -374,10 +514,16 @@ enum CardType {
 // ============================================================
 
 const char* mainMenuItems[]   = {
-  "Scan & Info", "Read Card", "Key Attack", "Clone Card",
-  "Write Card", "SD Card", "Return to Cypher OS"
+  "Scan & Info", "Demo Mode", "Read Card", "Key Attack", "Clone Card",
+  "Write Card", "SD Card", "Emulate Tag", "SD Web Server", "Return to Cypher OS"
 };
-const int   mainMenuCount     = 7;
+const int   mainMenuCount     = 10;
+
+const char* demoMenuItems[]   = { "Tag Studio", "Dump + Web", "Badge Writer", "Puzzle Hunt", "Back" };
+const int   demoMenuCount     = 5;
+
+const char* emulateMenuItems[] = { "NDEF from SD", "NTAG Dump", "UID Only", "Back" };
+const int   emulateMenuCount   = 4;
 
 const char* readMenuItems[]   = { "UID Only", "Read NDEF", "Dump MIFARE", "Dump NTAG", "Back" };
 const int   readMenuCount     = 5;
@@ -406,6 +552,8 @@ int currentSubMenuItem  = 0;
 String fileList[20];
 int fileCount       = 0;
 int currentFileIndex= 0;
+String lastSavedFilename = "";
+String lastSavedCompanion = "";
 
 // ============================================================
 // DATA STRUCTURES
@@ -448,6 +596,20 @@ struct SectorKeyMap {
   bool    keyBKnown[40];
   int     crackedCount;
   int     numSectors;
+};
+
+struct NDEFDecoded {
+  bool ok;
+  char recordType;
+  String label;
+  String value;
+};
+
+struct NDEFPreset {
+  char recordType;
+  uint8_t prefix;
+  String payload;
+  String label;
 };
 
 // Global NFC data buffers (kept as globals to avoid large stack allocations)
@@ -598,13 +760,90 @@ void displayTitleScreen() {
   display.display();
 }
 
+String pn532FirmwareLine(uint32_t ver) {
+  if (!ver) return "FW: unavailable";
+  return "FW: " + String((ver >> 16) & 0xFF) + "." + String((ver >> 8) & 0xFF);
+}
+
+String pn532ChipLine(uint32_t ver) {
+  if (!ver) return "Chip: not found";
+  return "Chip: PN5" + String((ver >> 24) & 0xFF, HEX);
+}
+
+bool initPn532Attempt(bool showStatus) {
+  if (showStatus) displayInfo("PN532 NFC", "Recovering bus...");
+  nfc.recoverBus();
+  delay(80);
+
+  uint32_t ver = nfc.getFirmwareVersion();
+  if (!ver) {
+    pn532Ready = false;
+    pn532FirmwareVersion = 0;
+    return false;
+  }
+
+  pn532FirmwareVersion = ver;
+  pn532Ready = nfc.SAMConfig();
+  if (pn532Ready) {
+    nfc.setPassiveActivationRetries(0x05);
+  }
+  return pn532Ready;
+}
+
+bool initPn532WithAttempts(uint8_t attempts, bool showProgress) {
+  for (uint8_t i = 0; i < attempts; i++) {
+    if (showProgress) {
+      displayInfo("PN532 NFC", "Initializing...",
+                  "Attempt " + String(i + 1) + "/" + String(attempts));
+    }
+    if (initPn532Attempt(false)) return true;
+    delay(180);
+  }
+  pn532Ready = false;
+  return false;
+}
+
+bool ensurePn532ReadyOrPrompt(const char* action) {
+  if (pn532Ready && nfc.probe()) return true;
+  pn532Ready = false;
+
+  if (initPn532WithAttempts(2, true)) {
+    displayInfo("PN532 Ready", pn532ChipLine(pn532FirmwareVersion),
+                pn532FirmwareLine(pn532FirmwareVersion));
+    delay(700);
+    return true;
+  }
+
+  displayInfo("PN532 Missing", action ? action : "Reader unavailable",
+              "Select:Retry", "Back:Menu");
+  while (true) {
+    int btn = getButtonInput();
+    if (btn == BUTTON_BACK) return false;
+    if (btn == BUTTON_SELECT) {
+      if (initPn532WithAttempts(PN532_BOOT_ATTEMPTS, true)) {
+        displayInfo("PN532 Ready", pn532ChipLine(pn532FirmwareVersion),
+                    pn532FirmwareLine(pn532FirmwareVersion));
+        delay(900);
+        return true;
+      }
+      displayInfo("PN532 Missing", "Power-cycle module",
+                  "Select:Retry", "Back:Menu");
+    }
+    delay(25);
+  }
+}
+
 void redisplayCurrentMenu() {
   switch (appState) {
     case STATE_MAIN_MENU:
-      displayMenuScreen("CYPHER NFC", mainMenuItems, mainMenuCount, currentMenuItem);
+      displayMenuScreen(pn532Ready ? "CYPHER NFC" : "CYPHER NFC !PN532",
+                        mainMenuItems, mainMenuCount, currentMenuItem);
       break;
     case STATE_READ_SUBMENU:
       displayMenuScreen("Read Card", readMenuItems, readMenuCount, currentSubMenuItem);
+      break;
+    case STATE_DEMO_SUBMENU:
+      displayMenuScreen("Demo Mode", demoMenuItems, demoMenuCount, currentSubMenuItem);
       break;
     case STATE_ATTACK_SUBMENU:
       displayMenuScreen("Key Attack", attackMenuItems, attackMenuCount, currentSubMenuItem);
@@ -617,6 +856,9 @@ void redisplayCurrentMenu() {
       break;
     case STATE_SD_SUBMENU:
       displayMenuScreen("SD Card", sdMenuItems, sdMenuCount, currentSubMenuItem);
+      break;
+    case STATE_EMULATE_SUBMENU:
+      displayMenuScreen("Emulate Tag", emulateMenuItems, emulateMenuCount, currentSubMenuItem);
       break;
   }
 }
@@ -659,10 +901,35 @@ int getButtonInput() {
 bool waitForCard(uint8_t* uid, uint8_t* uidLength,
                  const char* prompt1 = "Place card",
                  const char* prompt2 = "near reader") {
+  if (!ensurePn532ReadyOrPrompt("NFC reader needed")) return false;
   displayInfo("Waiting...", prompt1, prompt2, "Select/Back:Cancel");
   while (true) {
     if (nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, uidLength)) {
+      pn532Ready = true;
       return true;
+    }
+    if (nfc.hadTransportFault()) {
+      pn532Ready = false;
+      displayInfo("PN532 Read Error", "Recovering bus...",
+                  "Keep tag still");
+      if (!initPn532WithAttempts(2, false)) {
+        displayInfo("PN532 Missing", "Select:Retry", "Back:Menu");
+        while (true) {
+          int retryBtn = getButtonInput();
+          if (retryBtn == BUTTON_BACK) return false;
+          if (retryBtn == BUTTON_SELECT) {
+            if (initPn532WithAttempts(PN532_BOOT_ATTEMPTS, true)) {
+              displayInfo("Waiting...", prompt1, prompt2, "Select/Back:Cancel");
+              break;
+            }
+            displayInfo("PN532 Missing", "Power-cycle module",
+                        "Select:Retry", "Back:Menu");
+          }
+          delay(25);
+        }
+      } else {
+        displayInfo("Waiting...", prompt1, prompt2, "Select/Back:Cancel");
+      }
     }
     int btn = getButtonInput();
     if (btn == BUTTON_SELECT || btn == BUTTON_BACK) {
@@ -708,6 +975,7 @@ void initSDCard() {
 
   if (!SD.begin(SD_CS, SPI, 25000000)) {
     displayInfo("SD Error", "Init failed!", "Check SD card");
+    sdReady = false;
     delay(2000);
     return;
   }
@@ -715,6 +983,7 @@ void initSDCard() {
   uint8_t cardType = SD.cardType();
   if (cardType == CARD_NONE) {
     displayInfo("SD Error", "No card found");
+    sdReady = false;
     delay(2000);
     return;
   }
@@ -729,6 +998,7 @@ void initSDCard() {
   ensureAppDir();
   String sizeStr = String((uint32_t)(SD.cardSize() / (1024 * 1024))) + " MB";
   displayInfo("SD Ready", typeStr, sizeStr, APP_DIR);
+  sdReady = true;
   delay(1500);
 }
 
@@ -907,6 +1177,496 @@ void hexViewFile() {
 }
 
 // ============================================================
+// LOGGING & TEXT HELPERS
+// ============================================================
+
+String uidToString(const uint8_t* uid, uint8_t uidLength) {
+  String uidStr = "";
+  for (int i = 0; i < uidLength; i++) {
+    if (uid[i] < 0x10) uidStr += "0";
+    uidStr += String(uid[i], HEX);
+    if (i < uidLength - 1) uidStr += ":";
+  }
+  uidStr.toUpperCase();
+  return uidStr;
+}
+
+String csvEscape(const String& value) {
+  bool needsQuotes = value.indexOf(',') >= 0 || value.indexOf('"') >= 0 ||
+                     value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0;
+  if (!needsQuotes) return value;
+  String out = "\"";
+  for (size_t i = 0; i < value.length(); i++) {
+    if (value[i] == '"') out += "\"\"";
+    else out += value[i];
+  }
+  out += "\"";
+  return out;
+}
+
+void appendScanLog(const String& uid, const String& type,
+                   const String& action, const String& filename = "-") {
+  if (!sdReady) return;
+  ensureAppDir();
+  String logPath = appPath("SCANLOG.CSV");
+  bool needsHeader = !SD.exists(logPath);
+  File f = SD.open(logPath.c_str(), FILE_APPEND);
+  if (!f) return;
+  if (needsHeader) f.println("uptime_ms,uid,type,action,filename");
+  f.print(millis()); f.print(",");
+  f.print(csvEscape(uid)); f.print(",");
+  f.print(csvEscape(type)); f.print(",");
+  f.print(csvEscape(action)); f.print(",");
+  f.println(csvEscape(filename.length() ? filename : "-"));
+  f.close();
+}
+
+String ndefUriPrefix(uint8_t code) {
+  switch (code) {
+    case 0x01: return "http://www.";
+    case 0x02: return "https://www.";
+    case 0x03: return "http://";
+    case 0x04: return "https://";
+    default: return "";
+  }
+}
+
+NDEFPreset parseNDEFPreset(String content) {
+  content.trim();
+  NDEFPreset preset;
+  preset.recordType = 'T';
+  preset.prefix = 0;
+  preset.payload = content;
+  preset.label = "Text";
+
+  String lower = content;
+  lower.toLowerCase();
+  if (lower.startsWith("text:")) {
+    preset.payload = content.substring(5);
+    preset.payload.trim();
+    return preset;
+  }
+
+  if (lower.startsWith("url:")) {
+    preset.recordType = 'U';
+    preset.label = "URL";
+    preset.payload = content.substring(4);
+    preset.payload.trim();
+  }
+
+  if (preset.recordType == 'U') {
+    String urlLower = preset.payload;
+    urlLower.toLowerCase();
+    if (urlLower.startsWith("https://www.")) {
+      preset.prefix = 0x02;
+      preset.payload = preset.payload.substring(12);
+    } else if (urlLower.startsWith("http://www.")) {
+      preset.prefix = 0x01;
+      preset.payload = preset.payload.substring(11);
+    } else if (urlLower.startsWith("https://")) {
+      preset.prefix = 0x04;
+      preset.payload = preset.payload.substring(8);
+    } else if (urlLower.startsWith("http://")) {
+      preset.prefix = 0x03;
+      preset.payload = preset.payload.substring(7);
+    } else {
+      preset.prefix = 0x04;
+    }
+  }
+  return preset;
+}
+
+// ============================================================
+// READ-ONLY SD WEB SERVER
+// ============================================================
+
+String htmlEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '&') out += F("&amp;");
+    else if (c == '<') out += F("&lt;");
+    else if (c == '>') out += F("&gt;");
+    else if (c == '"') out += F("&quot;");
+    else out += c;
+  }
+  return out;
+}
+
+String jsonEscape(const String& in) {
+  String out;
+  out.reserve(in.length() + 8);
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i];
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += c;
+    } else if (c == '\n') {
+      out += F("\\n");
+    } else if (c == '\r') {
+      out += F("\\r");
+    } else if ((uint8_t)c >= 0x20) {
+      out += c;
+    }
+  }
+  return out;
+}
+
+String urlEncodeName(const String& in) {
+  const char* hex = "0123456789ABCDEF";
+  String out;
+  for (size_t i = 0; i < in.length(); i++) {
+    uint8_t c = (uint8_t)in[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+      out += (char)c;
+    } else {
+      out += '%';
+      out += hex[c >> 4];
+      out += hex[c & 0x0F];
+    }
+  }
+  return out;
+}
+
+bool isSafeWebFileName(const String& name) {
+  if (name.length() == 0 || name.length() > 64) return false;
+  if (name.indexOf('/') >= 0 || name.indexOf('\\') >= 0) return false;
+  if (name.indexOf("..") >= 0) return false;
+  return true;
+}
+
+String fileKind(const String& name) {
+  String upper = name;
+  upper.toUpperCase();
+  if (upper == "COUNTER.TXT") return "Counter";
+  if (upper == "SCANLOG.CSV") return "Scan Log";
+  if (upper.startsWith("KEY") && upper.endsWith(".TXT")) return "Key Map";
+  if (upper.endsWith(".MFD")) return "MIFARE Dump";
+  if (upper.endsWith(".BIN")) return "Binary Dump";
+  if (upper.endsWith(".TXT")) return "Text";
+  return "File";
+}
+
+String contentTypeForFile(const String& name) {
+  String upper = name;
+  upper.toUpperCase();
+  if (upper.endsWith(".TXT")) return "text/plain";
+  if (upper.endsWith(".CSV")) return "text/csv";
+  if (upper.endsWith(".HTML") || upper.endsWith(".HTM")) return "text/html";
+  return "application/octet-stream";
+}
+
+int countAppFiles() {
+  if (!sdReady) return 0;
+  ensureAppDir();
+  File root = SD.open(APP_DIR);
+  if (!root) return 0;
+  int count = 0;
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    if (!entry.isDirectory()) count++;
+    entry.close();
+  }
+  root.close();
+  return count;
+}
+
+String statusJson() {
+  String json = "{";
+  json += "\"pn532\":\"";
+  json += pn532Ready ? "ready" : "not_found";
+  json += "\",\"sd\":\"";
+  json += sdReady ? "ready" : "error";
+  json += "\",\"app_dir\":\"";
+  json += APP_DIR;
+  json += "\",\"files\":";
+  json += String(countAppFiles());
+  json += ",\"clients\":";
+  json += String(WiFi.softAPgetStationNum());
+  json += ",\"uptime_ms\":";
+  json += String(millis());
+  if (sdReady) {
+    json += ",\"sd_total_mb\":";
+    json += String((uint32_t)(SD.cardSize() / (1024 * 1024)));
+    json += ",\"sd_used_mb\":";
+    json += String((uint32_t)(SD.usedBytes() / (1024 * 1024)));
+  }
+  json += "}";
+  return json;
+}
+
+void sendWebHeader(const String& title) {
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "text/html", "");
+  webServer.sendContent(F("<!doctype html><html><head><meta charset='utf-8'>"));
+  webServer.sendContent(F("<meta name='viewport' content='width=device-width,initial-scale=1'>"));
+  webServer.sendContent("<title>" + htmlEscape(title) + "</title>");
+  webServer.sendContent(F("<style>body{margin:0;background:#071011;color:#e9fffb;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}"));
+  webServer.sendContent(F("header{padding:20px 16px;background:#092023;border-bottom:1px solid #1d5a60}main{max-width:980px;margin:0 auto;padding:16px}"));
+  webServer.sendContent(F("h1{margin:0;font-size:25px}.sub{color:#9ee2dd;margin-top:5px}.hero{border:1px solid #1d5a60;background:#0a191b;padding:14px;margin:14px 0;border-radius:8px}"));
+  webServer.sendContent(F(".status{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin:14px 0}.pill{border:1px solid #1d5a60;background:#0d2023;padding:10px;border-radius:6px}.pill b{display:block;color:#77fff1;font-size:12px;text-transform:uppercase}"));
+  webServer.sendContent(F("table{width:100%;border-collapse:collapse;background:#0b181a;border:1px solid #1d5a60}th,td{padding:10px;border-bottom:1px solid #12393d;text-align:left}"));
+  webServer.sendContent(F("a{color:#79fff0;text-decoration:none}.badge{font-size:12px;color:#001b1b;background:#78ffee;border-radius:4px;padding:3px 6px}pre{white-space:pre-wrap;word-break:break-word;background:#061416;border:1px solid #1d5a60;padding:12px;overflow:auto}"));
+  webServer.sendContent(F(".actions a{margin-right:10px}.muted{color:#88c8c5}.warn{color:#ffd27a}.loglink{float:right}</style></head><body>"));
+  webServer.sendContent("<header><h1>" + htmlEscape(title) + "</h1><div class='sub'>Read-only NFC appliance dashboard for /cypher-pn532</div></header><main>");
+}
+
+void sendWebFooter() {
+  webServer.sendContent(F("</main><script>async function s(){try{let r=await fetch('/api/status');let j=await r.json();for(let k in j){let e=document.querySelector('[data-s='+k+']');if(e)e.textContent=j[k];}}catch(e){}}setInterval(s,3000);s();</script></body></html>"));
+  webServer.sendContent("");
+}
+
+void handleStatusApi() {
+  webServer.sendHeader("Cache-Control", "no-store");
+  webServer.send(200, "application/json", statusJson());
+}
+
+void handleFilesApi() {
+  if (!sdReady) {
+    webServer.send(503, "application/json", "{\"error\":\"sd_not_ready\"}");
+    return;
+  }
+  ensureAppDir();
+  File root = SD.open(APP_DIR);
+  if (!root) {
+    webServer.send(500, "application/json", "{\"error\":\"open_failed\"}");
+    return;
+  }
+  webServer.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  webServer.send(200, "application/json", "");
+  webServer.sendContent("[");
+  bool first = true;
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    if (!entry.isDirectory()) {
+      String name = basenameFromPath(String(entry.name()));
+      String encoded = urlEncodeName(name);
+      if (!first) webServer.sendContent(",");
+      first = false;
+      String item = "{\"name\":\"" + jsonEscape(name) + "\",\"size\":" + String(entry.size()) +
+                    ",\"type\":\"" + jsonEscape(fileKind(name)) +
+                    "\",\"view_url\":\"/view?name=" + jsonEscape(encoded) +
+                    "\",\"download_url\":\"/download?name=" + jsonEscape(encoded) + "\"}";
+      webServer.sendContent(item);
+    }
+    entry.close();
+  }
+  root.close();
+  webServer.sendContent("]");
+}
+
+void handleRootPage() {
+  sendWebHeader("Cypher PN532 SD");
+  webServer.sendContent(F("<section class='hero'><b>Live field files</b><span class='muted loglink'>read-only</span><br><span class='muted'>Scan logs, dumps, key maps, and NDEF preset files are visible here without exposing write controls.</span></section>"));
+  webServer.sendContent(F("<section class='status'>"));
+  webServer.sendContent(F("<div class='pill'><b>PN532</b><span data-s='pn532'>"));
+  webServer.sendContent(pn532Ready ? "ready" : "not_found");
+  webServer.sendContent(F("</span></div><div class='pill'><b>SD</b><span data-s='sd'>"));
+  webServer.sendContent(sdReady ? "ready" : "error");
+  webServer.sendContent(F("</span></div><div class='pill'><b>Files</b><span data-s='files'>"));
+  webServer.sendContent(String(countAppFiles()));
+  webServer.sendContent(F("</span></div><div class='pill'><b>Clients</b><span data-s='clients'>"));
+  webServer.sendContent(String(WiFi.softAPgetStationNum()));
+  webServer.sendContent(F("</span></div></section>"));
+  if (SD.exists(appPath("SCANLOG.CSV"))) {
+    webServer.sendContent(F("<p><a href='/view?name=SCANLOG.CSV'>View scan log</a> <span class='muted'>CSV logger: uptime, UID, type, action, filename</span></p>"));
+  }
+
+  if (!sdReady) {
+    webServer.sendContent(F("<p class='warn'>SD card is not ready. Reinsert the card and restart the app.</p>"));
+    sendWebFooter();
+    return;
+  }
+
+  ensureAppDir();
+  File root = SD.open(APP_DIR);
+  if (!root) {
+    webServer.sendContent(F("<p class='warn'>Could not open /cypher-pn532.</p>"));
+    sendWebFooter();
+    return;
+  }
+
+  webServer.sendContent(F("<table><thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Actions</th></tr></thead><tbody>"));
+  bool any = false;
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+    if (!entry.isDirectory()) {
+      any = true;
+      String name = basenameFromPath(String(entry.name()));
+      String encoded = urlEncodeName(name);
+      webServer.sendContent("<tr><td>" + htmlEscape(name) + "</td><td><span class='badge'>" +
+                            htmlEscape(fileKind(name)) + "</span></td><td>" + String(entry.size()) +
+                            "</td><td class='actions'><a href='/view?name=" + encoded +
+                            "'>View</a><a href='/download?name=" + encoded + "'>Download</a></td></tr>");
+    }
+    entry.close();
+  }
+  root.close();
+  if (!any) webServer.sendContent(F("<tr><td colspan='4' class='muted'>No files yet. Run a dump or key map first.</td></tr>"));
+  webServer.sendContent(F("</tbody></table>"));
+  sendWebFooter();
+}
+
+void handleViewFile() {
+  String name = webServer.arg("name");
+  if (!isSafeWebFileName(name)) {
+    webServer.send(400, "text/plain", "Bad file name");
+    return;
+  }
+  String path = appPath(name);
+  if (!SD.exists(path)) {
+    webServer.send(404, "text/plain", "Not found");
+    return;
+  }
+  File f = SD.open(path.c_str(), FILE_READ);
+  if (!f) {
+    webServer.send(500, "text/plain", "Open failed");
+    return;
+  }
+
+  sendWebHeader(name);
+  webServer.sendContent("<p><a href='/'>Back to files</a> <span class='muted'>Read-only preview</span></p><pre>");
+  String upper = name;
+  upper.toUpperCase();
+  if (upper.endsWith(".TXT") || upper.endsWith(".CSV")) {
+    char buf[97];
+    while (f.available()) {
+      size_t n = f.readBytes(buf, sizeof(buf) - 1);
+      buf[n] = 0;
+      webServer.sendContent(htmlEscape(String(buf)));
+      delay(1);
+    }
+  } else {
+    uint8_t buf[16];
+    uint32_t offset = 0;
+    while (f.available() && offset < 2048) {
+      size_t n = f.read(buf, sizeof(buf));
+      char line[96];
+      snprintf(line, sizeof(line), "%04lX: ", (unsigned long)offset);
+      String out = line;
+      for (size_t i = 0; i < n; i++) {
+        if (buf[i] < 0x10) out += "0";
+        out += String(buf[i], HEX);
+        out += " ";
+      }
+      out += " | ";
+      for (size_t i = 0; i < n; i++) {
+        char c = (char)buf[i];
+        out += (c >= 0x20 && c < 0x7F) ? c : '.';
+      }
+      out += "\n";
+      out.toUpperCase();
+      webServer.sendContent(out);
+      offset += n;
+      delay(1);
+    }
+    if (f.available()) webServer.sendContent("\nPreview limited to first 2048 bytes. Use Download for the full file.\n");
+  }
+  f.close();
+  webServer.sendContent(F("</pre>"));
+  sendWebFooter();
+}
+
+void handleDownloadFile() {
+  String name = webServer.arg("name");
+  if (!isSafeWebFileName(name)) {
+    webServer.send(400, "text/plain", "Bad file name");
+    return;
+  }
+  String path = appPath(name);
+  if (!SD.exists(path)) {
+    webServer.send(404, "text/plain", "Not found");
+    return;
+  }
+  File f = SD.open(path.c_str(), FILE_READ);
+  if (!f) {
+    webServer.send(500, "text/plain", "Open failed");
+    return;
+  }
+  webServer.sendHeader("Content-Disposition", "attachment; filename=\"" + name + "\"");
+  webServer.streamFile(f, contentTypeForFile(name));
+  f.close();
+}
+
+void drawWebServerScreen() {
+  display.clearDisplay();
+  drawBorder();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(8, 8);
+  display.println("PN532 SD Web");
+  display.drawLine(0, 24, SCREEN_WIDTH, 24, SSD1306_WHITE);
+  display.setCursor(8, 34);
+  display.print("SSID: "); display.println(WEB_AP_SSID);
+  display.setCursor(8, 48);
+  display.print("Pass: "); display.println(WEB_AP_PASS);
+  display.setCursor(8, 62);
+  display.println("URL: http://192.168.4.1");
+  display.setCursor(8, 80);
+  display.print("PN532: "); display.print(pn532Ready ? "ready" : "missing");
+  display.print(" SD: "); display.println(sdReady ? "ok" : "err");
+  display.setCursor(8, 94);
+  display.print("Clients: "); display.print(WiFi.softAPgetStationNum());
+  display.print(" Files: "); display.println(countAppFiles());
+  display.setCursor(8, 114);
+  display.println("Back/Q exits");
+  display.display();
+}
+
+void startReadOnlyWebServer() {
+  if (!sdReady) {
+    displayInfo("SD Not Ready", "Cannot start web", "Check card");
+    delay(2500);
+    redisplayCurrentMenu();
+    return;
+  }
+
+  displayInfo("Starting AP", WEB_AP_SSID, "Please wait...");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(WEB_AP_IP, WEB_AP_GATEWAY, WEB_AP_SUBNET);
+  if (!WiFi.softAP(WEB_AP_SSID, WEB_AP_PASS)) {
+    displayInfo("WiFi Error", "AP start failed");
+    delay(2500);
+    redisplayCurrentMenu();
+    return;
+  }
+
+  webServer.on("/", HTTP_GET, handleRootPage);
+  webServer.on("/api/status", HTTP_GET, handleStatusApi);
+  webServer.on("/api/files", HTTP_GET, handleFilesApi);
+  webServer.on("/view", HTTP_GET, handleViewFile);
+  webServer.on("/download", HTTP_GET, handleDownloadFile);
+  webServer.onNotFound([]() {
+    webServer.send(404, "text/plain", "Not found");
+  });
+  webServer.begin();
+
+  uint32_t lastDraw = 0;
+  while (true) {
+    webServer.handleClient();
+    int btn = getButtonInput();
+    if (btn == BUTTON_BACK || btn == BUTTON_SELECT) break;
+    if (millis() - lastDraw > 1000) {
+      drawWebServerScreen();
+      lastDraw = millis();
+    }
+    delay(5);
+  }
+
+  webServer.stop();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+  displayInfo("Web Server", "Stopped");
+  delay(1000);
+  redisplayCurrentMenu();
+}
+
+// ============================================================
 // CARD TYPE DETECTION
 // ============================================================
 
@@ -932,9 +1692,15 @@ CardType detectCardType(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
       }
     } else {
       // Auth failed — still MIFARE Classic but locked with non-default key
-      info->type = CARD_MIFARE_CLASSIC_1K;
-      info->totalBlocks = 64;
-      strncpy(info->typeName, "MIFARE Classic ?K", sizeof(info->typeName));
+      if (nfc.hadTransportFault()) {
+        pn532Ready = false;
+        info->type = CARD_NFC_UNKNOWN;
+        strncpy(info->typeName, "PN532 read error", sizeof(info->typeName));
+      } else {
+        info->type = CARD_MIFARE_CLASSIC_1K;
+        info->totalBlocks = 64;
+        strncpy(info->typeName, "MIFARE Classic ?K", sizeof(info->typeName));
+      }
     }
     return info->type;
   }
@@ -957,6 +1723,10 @@ CardType detectCardType(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
         info->type = CARD_MIFARE_ULTRALIGHT; info->totalPages = 42;
         strncpy(info->typeName, "Ultralight", sizeof(info->typeName));
       }
+    } else if (nfc.hadTransportFault()) {
+      pn532Ready = false;
+      info->type = CARD_NFC_UNKNOWN; info->totalPages = 0;
+      strncpy(info->typeName, "PN532 read error", sizeof(info->typeName));
     } else {
       info->type = CARD_MIFARE_ULTRALIGHT; info->totalPages = 42;
       strncpy(info->typeName, "Ultralight", sizeof(info->typeName));
@@ -977,13 +1747,8 @@ void scanAndInfo() {
   CardInfo info;
   detectCardType(uid, uidLength, &info);
 
-  String uidStr = "";
-  for (int i = 0; i < uidLength; i++) {
-    if (uid[i] < 0x10) uidStr += "0";
-    uidStr += String(uid[i], HEX);
-    if (i < uidLength - 1) uidStr += ":";
-  }
-  uidStr.toUpperCase();
+  String uidStr = uidToString(uid, uidLength);
+  appendScanLog(uidStr, info.typeName, "scan_info");
 
   displayInfo(info.typeName,
               "UID: " + uidStr.substring(0, 17),
@@ -1081,6 +1846,8 @@ void dumpMifareClassic(uint8_t* uid, uint8_t uidLength, bool is4K) {
 
 bool saveMifareDumpToSD(bool is4K) {
   ensureAppDir();
+  lastSavedFilename = "";
+  lastSavedCompanion = "";
   String mfdName = generateUniqueFilename("dmp", "mfd");
   File mfd = SD.open(appPath(mfdName).c_str(), FILE_WRITE);
   if (!mfd) {
@@ -1136,6 +1903,8 @@ bool saveMifareDumpToSD(bool is4K) {
     txt.close();
   }
 
+  lastSavedFilename = mfdName;
+  lastSavedCompanion = txtName;
   displayInfo("Saved!", mfdName, txtName);
   delay(2500);
   return true;
@@ -1354,10 +2123,178 @@ bool readNTAGPageRaw(uint8_t page, uint8_t* buf) {
   uint8_t cmd[] = {0x30, page}; // MIFARE_CMD_READ
   uint8_t resp[18];
   uint8_t respLen = sizeof(resp);
-  if (!nfc.inDataExchange(cmd, 2, resp, &respLen)) return false;
+  if (!nfc.inDataExchange(cmd, 2, resp, &respLen)) {
+    if (nfc.hadTransportFault()) {
+      pn532Ready = false;
+      if (initPn532WithAttempts(1, false)) {
+        respLen = sizeof(resp);
+        if (!nfc.inDataExchange(cmd, 2, resp, &respLen)) return false;
+      } else {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
   if (respLen < 4) return false;
   memcpy(buf, resp, 4); // first 4 bytes = requested page data
   return true;
+}
+
+bool readNDEFPages(CardInfo* info, int* maxPage, int* readCount, int* failCount,
+                   bool* cancelled) {
+  *maxPage = min((int)info->totalPages, 42);
+  *readCount = 0;
+  *failCount = 0;
+  if (cancelled) *cancelled = false;
+  memset(ntagDump.pageRead, false, sizeof(ntagDump.pageRead));
+  memset(ntagDump.pages, 0, sizeof(ntagDump.pages));
+
+  uint8_t consecutiveFails = 0;
+  for (int p = 0; p < *maxPage; p++) {
+    displayProgress("Read NDEF", p + 1, *maxPage, ("Page " + String(p)).c_str());
+    int btn = getButtonInput();
+    if (btn == BUTTON_BACK || btn == BUTTON_SELECT) {
+      if (cancelled) *cancelled = true;
+      return false;
+    }
+    bool ok = readNTAGPageRaw(p, ntagDump.pages[p]);
+    ntagDump.pageRead[p] = ok;
+    if (ok) {
+      (*readCount)++;
+      consecutiveFails = 0;
+    } else {
+      (*failCount)++;
+      consecutiveFails++;
+      if (consecutiveFails >= PN532_READ_FAIL_LIMIT) {
+        pn532Ready = false;
+        break;
+      }
+    }
+    M5Cardputer.update();
+    delay(15);
+  }
+  ntagDump.totalPages = *maxPage;
+  strncpy(ntagDump.typeName, info->typeName, sizeof(ntagDump.typeName));
+  return *readCount > 0;
+}
+
+String bytesToString(const uint8_t* data, int len) {
+  String out = "";
+  for (int i = 0; i < len; i++) {
+    char c = (char)data[i];
+    if (c >= 0x20 && c < 0x7F) out += c;
+  }
+  return out;
+}
+
+bool decodeCachedNDEF(int maxPage, NDEFDecoded* decoded) {
+  decoded->ok = false;
+  decoded->recordType = 0;
+  decoded->label = "Raw NDEF";
+  decoded->value = "";
+
+  uint8_t buf[160];
+  int len = 0;
+  for (int p = 4; p < maxPage && len + 4 <= (int)sizeof(buf); p++) {
+    for (int j = 0; j < 4; j++) buf[len++] = ntagDump.pageRead[p] ? ntagDump.pages[p][j] : 0;
+  }
+
+  for (int i = 0; i < len;) {
+    uint8_t tlv = buf[i++];
+    if (tlv == 0x00) continue;
+    if (tlv == 0xFE) break;
+    if (tlv != 0x03 || i >= len) continue;
+
+    int tlvLen = buf[i++];
+    if (tlvLen == 0xFF) {
+      if (i + 1 >= len) return false;
+      tlvLen = ((int)buf[i] << 8) | buf[i + 1];
+      i += 2;
+    }
+    if (tlvLen <= 0 || i + tlvLen > len) return false;
+
+    int r = i;
+    uint8_t flags = buf[r++];
+    if ((flags & 0x10) == 0) return false; // short records only
+    uint8_t typeLen = buf[r++];
+    uint8_t payloadLen = buf[r++];
+    uint8_t idLen = 0;
+    if (flags & 0x08) idLen = buf[r++];
+    if (typeLen != 1 || r + typeLen + idLen + payloadLen > i + tlvLen) return false;
+    char type = (char)buf[r++];
+    r += idLen;
+
+    if (type == 'U' && payloadLen >= 1) {
+      decoded->ok = true;
+      decoded->recordType = 'U';
+      decoded->label = "NDEF URL";
+      decoded->value = ndefUriPrefix(buf[r]) + bytesToString(&buf[r + 1], payloadLen - 1);
+      return true;
+    }
+    if (type == 'T' && payloadLen >= 1) {
+      uint8_t status = buf[r++];
+      int langLen = status & 0x3F;
+      if (payloadLen < 1 + langLen) return false;
+      decoded->ok = true;
+      decoded->recordType = 'T';
+      decoded->label = "NDEF Text";
+      decoded->value = bytesToString(&buf[r + langLen], payloadLen - 1 - langLen);
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+void showRawNDEFPages(const String& title, int maxPage) {
+  int viewPage = 0;
+  while (true) {
+    display.clearDisplay();
+    drawBorder();
+    display.setCursor(4, 4);
+    display.println(title);
+    display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
+
+    for (int row = 0; row < 4 && (viewPage + row) < maxPage; row++) {
+      int p = viewPage + row;
+      display.setCursor(4, 18 + row * 10);
+      display.print(p < 10 ? "P0" : "P"); display.print(p); display.print(":");
+      if (ntagDump.pageRead[p]) {
+        for (int j = 0; j < 4; j++) {
+          if (ntagDump.pages[p][j] < 0x10) display.print("0");
+          display.print(ntagDump.pages[p][j], HEX); display.print(" ");
+        }
+      } else {
+        display.print("-- -- -- --");
+      }
+    }
+    display.setCursor(4, 56);
+    display.println("U/D:Scroll S/Back:Exit");
+    display.display();
+
+    int btn = getButtonInput();
+    if (btn == BUTTON_DOWN && viewPage + 4 < maxPage) viewPage += 4;
+    if (btn == BUTTON_UP   && viewPage > 0)           viewPage -= 4;
+    if (btn == BUTTON_SELECT || btn == BUTTON_BACK) break;
+    delay(50);
+  }
+}
+
+void showDecodedNDEFOrRaw(CardInfo* info, int maxPage, NDEFDecoded* decoded) {
+  if (decoded->ok) {
+    displayInfo(decoded->label,
+                decoded->value.substring(0, 24),
+                decoded->value.substring(24, 48),
+                "Select:Raw Back:Menu");
+    while (true) {
+      int btn = getButtonInput();
+      if (btn == BUTTON_BACK) return;
+      if (btn == BUTTON_SELECT) break;
+      delay(30);
+    }
+  }
+  showRawNDEFPages(String(info->typeName) + " NDEF", maxPage);
 }
 
 void dumpNTAG(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
@@ -1367,9 +2304,19 @@ void dumpNTAG(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
   strncpy(ntagDump.typeName, info->typeName, sizeof(ntagDump.typeName));
   memset(ntagDump.pageRead, false, sizeof(ntagDump.pageRead));
 
+  uint8_t consecutiveFails = 0;
   for (int p = 0; p < info->totalPages; p++) {
     displayProgress("NTAG Dump", p, info->totalPages, ("Page " + String(p)).c_str());
-    ntagDump.pageRead[p] = readNTAGPageRaw(p, ntagDump.pages[p]);
+    int btn = getButtonInput();
+    if (btn == BUTTON_BACK || btn == BUTTON_SELECT) break;
+    bool ok = readNTAGPageRaw(p, ntagDump.pages[p]);
+    ntagDump.pageRead[p] = ok;
+    if (ok) {
+      consecutiveFails = 0;
+    } else if (++consecutiveFails >= PN532_READ_FAIL_LIMIT) {
+      pn532Ready = false;
+      break;
+    }
     delay(2);
   }
 
@@ -1383,6 +2330,8 @@ void dumpNTAG(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
 
 void saveNTAGDumpToSD() {
   ensureAppDir();
+  lastSavedFilename = "";
+  lastSavedCompanion = "";
   String binName = generateUniqueFilename("ntg", "bin");
   File f = SD.open(appPath(binName).c_str(), FILE_WRITE);
   if (!f) {
@@ -1430,6 +2379,8 @@ void saveNTAGDumpToSD() {
     t.close();
   }
 
+  lastSavedFilename = binName;
+  lastSavedCompanion = txtName;
   displayInfo("Saved!", binName, txtName);
   delay(2500);
 }
@@ -1448,46 +2399,29 @@ void readNDEF() {
     return;
   }
 
-  int maxPage = min((int)info.totalPages, 42);
-  displayInfo("Reading NDEF", "Pages 0-" + String(maxPage - 1), "Please wait...");
-
-  for (int p = 0; p < maxPage; p++) {
-    ntagDump.pageRead[p] = readNTAGPageRaw(p, ntagDump.pages[p]);
-    delay(2);
-  }
-  ntagDump.totalPages = maxPage;
+  int maxPage = 0;
+  int readCount = 0;
+  int failCount = 0;
+  bool cancelled = false;
+  bool readOk = readNDEFPages(&info, &maxPage, &readCount, &failCount, &cancelled);
   ntagDump.uidLength  = uidLength;
   memcpy(ntagDump.uid, uid, uidLength);
-  strncpy(ntagDump.typeName, info.typeName, sizeof(ntagDump.typeName));
 
-  // Scrollable OLED view
-  int viewPage = 0;
-  while (true) {
-    display.clearDisplay();
-    drawBorder();
-    display.setCursor(4, 4);
-    display.println(String(info.typeName) + " NDEF");
-    display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
-
-    for (int row = 0; row < 4 && (viewPage + row) < maxPage; row++) {
-      int p = viewPage + row;
-      display.setCursor(4, 18 + row * 10);
-      display.print(p < 10 ? "P0" : "P"); display.print(p); display.print(":");
-      for (int j = 0; j < 4; j++) {
-        if (ntagDump.pages[p][j] < 0x10) display.print("0");
-        display.print(ntagDump.pages[p][j], HEX); display.print(" ");
-      }
-    }
-    display.setCursor(4, 56);
-    display.println("U/D:Scroll S:Exit");
-    display.display();
-
-    int btn = getButtonInput();
-    if (btn == BUTTON_DOWN && viewPage + 4 < maxPage) viewPage += 4;
-    if (btn == BUTTON_UP   && viewPage > 0)           viewPage -= 4;
-    if (btn == BUTTON_SELECT) break;
-    delay(50);
+  if (!readOk) {
+    displayInfo(cancelled ? "NDEF Cancelled" : "Read failed",
+                String(readCount) + " pages read",
+                String(failCount) + " failed",
+                pn532Ready ? "Retry or Back" : "Retry / power-cycle");
+    delay(1500);
+    redisplayCurrentMenu();
+    return;
   }
+
+  NDEFDecoded decoded;
+  decodeCachedNDEF(maxPage, &decoded);
+  appendScanLog(uidToString(uid, uidLength), info.typeName,
+                decoded.ok ? "read_ndef_decoded" : "read_ndef_raw");
+  showDecodedNDEFOrRaw(&info, maxPage, &decoded);
   delay(200);
   redisplayCurrentMenu();
 }
@@ -1592,9 +2526,11 @@ String loadNDEFPreset(const char* filename, const String& defaultVal) {
 // recordType: 'U' (URI) or 'T' (Text)
 // For 'U': prefix = URI identifier code (0x04 = https://)
 // For 'T': prefix is ignored; lang code "en" is used
-bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
-                        char recordType, uint8_t prefix,
-                        const char* payload) {
+// Build a TLV-wrapped NDEF message into msg[] (must hold >=128 bytes).
+// recordType: 'U' (URI) or 'T' (Text). Returns total byte count.
+// Shared by buildAndWriteNDEF() (writing a card) and the tag emulator.
+int buildNDEFMessage(char recordType, uint8_t prefix,
+                     const char* payload, uint8_t* msg) {
   // Build the record type-specific payload bytes
   uint8_t pld[64];
   int pldLen = 0;
@@ -1616,7 +2552,6 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
   // NDEF TLV wrapper:
   // [0x03][TLV_len][0xD1][0x01][pldLen][type_char][pld...][0xFE]
   // TLV_len = 4 (record header) + pldLen
-  uint8_t msg[128] = {0};
   int idx = 0;
   msg[idx++] = 0x03;                    // NDEF Message TLV tag
   msg[idx++] = (uint8_t)(4 + pldLen);  // TLV length
@@ -1627,8 +2562,15 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
   memcpy(&msg[idx], pld, pldLen);
   idx += pldLen;
   msg[idx++] = 0xFE;                    // Terminator TLV
+  return idx;
+}
 
-  int totalBytes = idx;
+bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
+                        char recordType, uint8_t prefix,
+                        const char* payload) {
+  uint8_t msg[128] = {0};
+  int totalBytes = buildNDEFMessage(recordType, prefix, payload, msg);
+
   if (totalBytes > 120) {
     displayInfo("Too Long!", "Max 120 bytes", "Shorten content");
     delay(3000);
@@ -1652,7 +2594,9 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
 void writeNDEFUrl() {
   String url = loadNDEFPreset("NDEF_URL.TXT",
                               "github.com/dkyazzentwatwa/cypher-pn532");
-  displayInfo("NDEF URL", url.substring(0, 20), "Place NTAG card");
+  NDEFPreset preset = parseNDEFPreset(String("url:") + url);
+  String visible = ndefUriPrefix(preset.prefix) + preset.payload;
+  displayInfo("NDEF URL", visible.substring(0, 24), "Place NTAG card");
   delay(2000);
 
   uint8_t uid[7]; uint8_t uidLength;
@@ -1661,8 +2605,9 @@ void writeNDEFUrl() {
   }
 
   displayInfo("Writing URL...");
-  bool ok = buildAndWriteNDEF(uid, uidLength, 'U', 0x04, url.c_str()); // 0x04 = https://
-  displayInfo(ok ? "URL Written!" : "Write Failed", url.substring(0, 20),
+  bool ok = buildAndWriteNDEF(uid, uidLength, 'U', preset.prefix, preset.payload.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG", ok ? "write_url" : "write_url_failed", "NDEF_URL.TXT");
+  displayInfo(ok ? "URL Written!" : "Write Failed", visible.substring(0, 24),
               ok ? "Scan with phone!" : "");
   delay(2500);
   redisplayCurrentMenu();
@@ -1680,6 +2625,7 @@ void writeNDEFText() {
 
   displayInfo("Writing Text...");
   bool ok = buildAndWriteNDEF(uid, uidLength, 'T', 0, text.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG", ok ? "write_text" : "write_text_failed", "NDEF_TXT.TXT");
   displayInfo(ok ? "Text Written!" : "Write Failed", text.substring(0, 20));
   delay(2500);
   redisplayCurrentMenu();
@@ -1698,11 +2644,14 @@ void writeNDEFFromSD() {
     return;
   }
   String content = "";
-  while (f.available() && content.length() < 58) content += (char)f.read();
+  while (f.available() && content.length() < 90) content += (char)f.read();
   f.close();
   content.trim();
+  NDEFPreset preset = parseNDEFPreset(content);
+  String visible = (preset.recordType == 'U') ? ndefUriPrefix(preset.prefix) + preset.payload : preset.payload;
 
-  displayInfo("Writing as Text", content.substring(0, 20), "Place NTAG card");
+  displayInfo(preset.recordType == 'U' ? "Writing as URL" : "Writing as Text",
+              visible.substring(0, 24), "Place NTAG card");
   delay(2000);
 
   uint8_t uid[7]; uint8_t uidLength;
@@ -1710,8 +2659,11 @@ void writeNDEFFromSD() {
     redisplayCurrentMenu(); return;
   }
 
-  bool ok = buildAndWriteNDEF(uid, uidLength, 'T', 0, content.c_str());
-  displayInfo(ok ? "Written!" : "Failed", content.substring(0, 20));
+  bool ok = buildAndWriteNDEF(uid, uidLength, preset.recordType, preset.prefix, preset.payload.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG",
+                ok ? (preset.recordType == 'U' ? "write_sd_url" : "write_sd_text") : "write_sd_failed",
+                fileList[currentFileIndex]);
+  displayInfo(ok ? "Written!" : "Failed", visible.substring(0, 24));
   delay(2500);
   redisplayCurrentMenu();
 }
@@ -1727,13 +2679,8 @@ void readUIDOnly() {
   CardInfo info;
   detectCardType(uid, uidLength, &info);
 
-  String uidStr = "";
-  for (int i = 0; i < uidLength; i++) {
-    if (uid[i] < 0x10) uidStr += "0";
-    uidStr += String(uid[i], HEX);
-    if (i < uidLength - 1) uidStr += ":";
-  }
-  uidStr.toUpperCase();
+  String uidStr = uidToString(uid, uidLength);
+  appendScanLog(uidStr, info.typeName, "uid_only");
 
   Serial.print("TYPE: "); Serial.println(info.typeName);
   Serial.print("UID:  "); Serial.println(uidStr);
@@ -1766,7 +2713,9 @@ void dumpMifareFlow() {
 
   bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
   dumpMifareClassic(uid, uidLength, is4K);
-  saveMifareDumpToSD(is4K);
+  if (saveMifareDumpToSD(is4K)) {
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_mifare", lastSavedFilename);
+  }
   redisplayCurrentMenu();
 }
 
@@ -1787,6 +2736,7 @@ void dumpNTAGFlow() {
 
   dumpNTAG(uid, uidLength, &info);
   saveNTAGDumpToSD();
+  appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_ntag", lastSavedFilename);
   redisplayCurrentMenu();
 }
 
@@ -1803,15 +2753,265 @@ void dumpToSDFlow() {
   if (info.type == CARD_MIFARE_CLASSIC_1K || info.type == CARD_MIFARE_CLASSIC_4K) {
     bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
     dumpMifareClassic(uid, uidLength, is4K);
-    saveMifareDumpToSD(is4K);
+    if (saveMifareDumpToSD(is4K)) {
+      appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_auto", lastSavedFilename);
+    }
   } else if (info.totalPages > 0) {
     dumpNTAG(uid, uidLength, &info);
     saveNTAGDumpToSD();
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_auto", lastSavedFilename);
   } else {
     displayInfo("Unknown Card", "Cannot dump", info.typeName);
     delay(3000);
   }
   redisplayCurrentMenu();
+}
+
+// ============================================================
+// DEMO MODE
+// ============================================================
+
+void waitForDemoExit() {
+  while (true) {
+    int btn = getButtonInput();
+    if (btn == BUTTON_SELECT || btn == BUTTON_BACK) break;
+    delay(30);
+  }
+}
+
+void tagStudioFlow(bool puzzleMode) {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength)) { redisplayCurrentMenu(); return; }
+
+  CardInfo info;
+  detectCardType(uid, uidLength, &info);
+  String uidStr = uidToString(uid, uidLength);
+  String action = puzzleMode ? "puzzle_hunt" : "tag_studio";
+
+  if (info.totalPages > 0) {
+    int maxPage = 0, readCount = 0, failCount = 0;
+    bool cancelled = false;
+    if (!readNDEFPages(&info, &maxPage, &readCount, &failCount, &cancelled)) {
+      if (!cancelled) {
+        displayInfo("Read failed", String(readCount) + " pages read",
+                    String(failCount) + " failed",
+                    pn532Ready ? "Retry or Back" : "Retry / power-cycle");
+        delay(1500);
+      }
+      redisplayCurrentMenu();
+      return;
+    }
+    ntagDump.uidLength = uidLength;
+    memcpy(ntagDump.uid, uid, uidLength);
+    NDEFDecoded decoded;
+    decodeCachedNDEF(maxPage, &decoded);
+    appendScanLog(uidStr, info.typeName, action, decoded.ok ? decoded.label : "raw");
+
+    if (puzzleMode && decoded.ok) {
+      String clue = decoded.value;
+      String lower = clue;
+      lower.toLowerCase();
+      if (lower.startsWith("clue:")) clue = clue.substring(5);
+      else if (lower.startsWith("puzzle:")) clue = clue.substring(7);
+      clue.trim();
+      displayInfo("Puzzle Hunt", clue.substring(0, 24), clue.substring(24, 48), "Select/Back:Exit");
+      waitForDemoExit();
+    } else if (decoded.ok) {
+      displayInfo("Tag Studio", decoded.label,
+                  decoded.value.substring(0, 24),
+                  decoded.value.substring(24, 48));
+      delay(3500);
+    } else {
+      displayInfo("Tag Studio", info.typeName, "No decoded NDEF", uidStr.substring(0, 24));
+      delay(3000);
+    }
+  } else {
+    appendScanLog(uidStr, info.typeName, action);
+    displayInfo(puzzleMode ? "Puzzle Hunt" : "Tag Studio",
+                info.typeName,
+                "UID: " + uidStr.substring(0, 20),
+                info.totalBlocks ? String(info.totalBlocks) + " blocks" : "No NDEF");
+    delay(3500);
+  }
+  redisplayCurrentMenu();
+}
+
+void demoDumpWebFlow() {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength)) { redisplayCurrentMenu(); return; }
+
+  CardInfo info;
+  detectCardType(uid, uidLength, &info);
+  displayInfo("Dump + Web", info.typeName, "Saving to SD...");
+  delay(1000);
+
+  if (info.type == CARD_MIFARE_CLASSIC_1K || info.type == CARD_MIFARE_CLASSIC_4K) {
+    bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
+    dumpMifareClassic(uid, uidLength, is4K);
+    if (saveMifareDumpToSD(is4K)) {
+      appendScanLog(uidToString(uid, uidLength), info.typeName, "demo_dump_web", lastSavedFilename);
+    }
+  } else if (info.totalPages > 0) {
+    dumpNTAG(uid, uidLength, &info);
+    saveNTAGDumpToSD();
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "demo_dump_web", lastSavedFilename);
+  } else {
+    displayInfo("Unknown Card", "Cannot dump", info.typeName);
+    delay(3000);
+    redisplayCurrentMenu();
+    return;
+  }
+
+  displayInfo("Dump Saved", lastSavedFilename, "Select:Start Web", "Back:Menu");
+  while (true) {
+    int btn = getButtonInput();
+    if (btn == BUTTON_SELECT) { startReadOnlyWebServer(); return; }
+    if (btn == BUTTON_BACK) break;
+    delay(30);
+  }
+  redisplayCurrentMenu();
+}
+
+// ============================================================
+// CARD EMULATION (ISO14443A target mode — NTAG / Type 2 tag)
+//
+// Drives the PN532 as a tag via the M5Pn532 tgInitAsTarget/tgGetData/tgSetData
+// methods so a phone reads back NDEF content loaded from SD ("badge backup").
+// LIMITATION: MIFARE Classic emulation is NOT possible (chip can't run Crypto1
+// auth as a target); the RF UID is only partly controllable.
+// ============================================================
+
+#define EMU_MAX_PAGES 64
+static uint8_t emuPageImage[EMU_MAX_PAGES * 4];
+static int     emuPageCount = 0;
+
+static void emuPrepareHeader(const uint8_t* uid, uint8_t uidLen, uint8_t* uid3) {
+  memset(emuPageImage, 0, sizeof(emuPageImage));
+  uid3[0] = uidLen > 0 ? uid[0] : 0x04;
+  uid3[1] = uidLen > 1 ? uid[1] : 0x12;
+  uid3[2] = uidLen > 2 ? uid[2] : 0x34;
+  emuPageImage[0] = uid3[0];
+  emuPageImage[1] = uid3[1];
+  emuPageImage[2] = uid3[2];
+  emuPageImage[3] = uid3[0] ^ uid3[1] ^ uid3[2] ^ 0x88;
+  emuPageImage[12] = 0xE1;  // Capability Container: NTAG213, 144B, read/write
+  emuPageImage[13] = 0x10;
+  emuPageImage[14] = 0x12;
+  emuPageImage[15] = 0x00;
+}
+
+// Serve the prebuilt emuPageImage as a Type 2 tag until Select/Back is pressed.
+void runType2Emulation(const String& sourceLabel, const uint8_t* uid3) {
+  displayInfo("Emulating Tag", sourceLabel, "Tap phone now", "Select/Back: exit");
+  appendScanLog(uidToString(uid3, 3), "NTAG", "emulate", sourceLabel);
+
+  int bytes = emuPageCount * 4;
+  bool exit = false;
+  while (!exit) {
+    M5Cardputer.update();
+    int b = getButtonInput();
+    if (b == BUTTON_SELECT || b == BUTTON_BACK) break;
+
+    if (!nfc.tgInitAsTarget(uid3, 1200)) { delay(10); continue; }
+
+    while (!exit) {
+      M5Cardputer.update();
+      b = getButtonInput();
+      if (b == BUTTON_SELECT || b == BUTTON_BACK) { exit = true; break; }
+      uint8_t in[64];
+      int n = nfc.tgGetData(in, sizeof(in), 600);
+      if (n < 1) break;                          // field lost -> re-init
+      if (in[0] == 0x30 && n >= 2) {             // Type 2 READ <page>
+        uint8_t page = in[1];
+        uint8_t out[16];
+        for (int i = 0; i < 16; i++)
+          out[i] = emuPageImage[((page * 4) + i) % bytes];
+        nfc.tgSetData(out, 16, 400);
+      } else if (in[0] == 0x50) {                // HALT
+        break;
+      } else {
+        nfc.tgSetData(NULL, 0, 400);             // NAK / ignore others
+      }
+    }
+  }
+  displayInfo("Emulation", "Stopped");
+  delay(1000);
+  redisplayCurrentMenu();
+}
+
+void emulateNdefFromSD() {
+  String url  = loadNDEFPreset("NDEF_URL.TXT", "");
+  String text = loadNDEFPreset("NDEF_TXT.TXT", "");
+  NDEFPreset preset = (url.length() > 0)
+      ? parseNDEFPreset(String("url:") + url)
+      : parseNDEFPreset(String("text:") + (text.length() ? text : String("CYPHER PN532 2026")));
+
+  uint8_t msg[128] = {0};
+  int totalBytes = buildNDEFMessage(preset.recordType, preset.prefix,
+                                    preset.payload.c_str(), msg);
+  if (totalBytes > (EMU_MAX_PAGES - 4) * 4) totalBytes = (EMU_MAX_PAGES - 4) * 4;
+
+  uint8_t uid3[3];
+  uint8_t noUid[1] = {0};
+  emuPrepareHeader(noUid, 0, uid3);
+  memcpy(&emuPageImage[16], msg, totalBytes);   // page 4 = byte offset 16
+  emuPageCount = 4 + ((totalBytes + 3) / 4) + 1;
+  if (emuPageCount > EMU_MAX_PAGES) emuPageCount = EMU_MAX_PAGES;
+
+  runType2Emulation((preset.recordType == 'U') ? "NDEF URL" : "NDEF Text", uid3);
+}
+
+void emulateNtagDumpFromSD() {
+  if (!browseFiles(".bin")) { redisplayCurrentMenu(); return; }
+  String shortName = fileList[currentFileIndex];
+  File f = SD.open(appPath(shortName).c_str(), FILE_READ);
+  if (!f) {
+    displayInfo("Error", "Cannot open", shortName);
+    delay(2000); redisplayCurrentMenu(); return;
+  }
+  memset(emuPageImage, 0, sizeof(emuPageImage));
+  int n = f.read(emuPageImage, sizeof(emuPageImage));
+  f.close();
+  if (n < 16) {
+    displayInfo("Error", "Dump too small", shortName);
+    delay(2000); redisplayCurrentMenu(); return;
+  }
+  emuPageCount = n / 4;
+  uint8_t uid3[3] = { emuPageImage[0], emuPageImage[1], emuPageImage[2] };
+  runType2Emulation(shortName.substring(0, 16), uid3);
+}
+
+void emulateUidOnly() {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength, "Scan UID to", "emulate")) {
+    redisplayCurrentMenu(); return;
+  }
+  uint8_t uid3[3];
+  emuPrepareHeader(uid, uidLength, uid3);
+  emuPageImage[16] = 0x03;  // empty NDEF TLV
+  emuPageImage[17] = 0x00;
+  emuPageImage[18] = 0xFE;
+  emuPageCount = 6;
+  runType2Emulation("UID: " + uidToString(uid, uidLength).substring(0, 13), uid3);
+}
+
+void executeEmulateMenuItem(int idx) {
+  switch (idx) {
+    case 0: emulateNdefFromSD();     break;
+    case 1: emulateNtagDumpFromSD(); break;
+    case 2: emulateUidOnly();        break;
+    case 3: appState = STATE_MAIN_MENU; redisplayCurrentMenu(); break;
+  }
+}
+
+void executeDemoMenuItem(int idx) {
+  switch (idx) {
+    case 0: tagStudioFlow(false); break;
+    case 1: demoDumpWebFlow(); break;
+    case 2: writeNDEFFromSD(); break;
+    case 3: tagStudioFlow(true); break;
+    case 4: appState = STATE_MAIN_MENU; redisplayCurrentMenu(); break;
+  }
 }
 
 // ============================================================
@@ -1874,26 +3074,37 @@ void executeMainMenuItem(int idx) {
       scanAndInfo();
       break;
     case 1:
+      appState = STATE_DEMO_SUBMENU; currentSubMenuItem = 0;
+      displayMenuScreen("Demo Mode", demoMenuItems, demoMenuCount, 0);
+      break;
+    case 2:
       appState = STATE_READ_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Read Card", readMenuItems, readMenuCount, 0);
       break;
-    case 2:
+    case 3:
       appState = STATE_ATTACK_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Key Attack", attackMenuItems, attackMenuCount, 0);
       break;
-    case 3:
+    case 4:
       appState = STATE_CLONE_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Clone Card", cloneMenuItems, cloneMenuCount, 0);
       break;
-    case 4:
+    case 5:
       appState = STATE_WRITE_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Write Card", writeMenuItems, writeMenuCount, 0);
       break;
-    case 5:
+    case 6:
       appState = STATE_SD_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("SD Card", sdMenuItems, sdMenuCount, 0);
       break;
-    case 6:
+    case 7:
+      appState = STATE_EMULATE_SUBMENU; currentSubMenuItem = 0;
+      displayMenuScreen("Emulate Tag", emulateMenuItems, emulateMenuCount, 0);
+      break;
+    case 8:
+      startReadOnlyWebServer();
+      break;
+    case 9:
       returnToLauncher();
       break;
   }
@@ -1922,6 +3133,10 @@ void handleButtonPress() {
       items = (const char**)readMenuItems; count = readMenuCount;
       title = "Read Card"; selPtr = &currentSubMenuItem;
       break;
+    case STATE_DEMO_SUBMENU:
+      items = (const char**)demoMenuItems; count = demoMenuCount;
+      title = "Demo Mode"; selPtr = &currentSubMenuItem;
+      break;
     case STATE_ATTACK_SUBMENU:
       items = (const char**)attackMenuItems; count = attackMenuCount;
       title = "Key Attack"; selPtr = &currentSubMenuItem;
@@ -1937,6 +3152,10 @@ void handleButtonPress() {
     case STATE_SD_SUBMENU:
       items = (const char**)sdMenuItems; count = sdMenuCount;
       title = "SD Card"; selPtr = &currentSubMenuItem;
+      break;
+    case STATE_EMULATE_SUBMENU:
+      items = (const char**)emulateMenuItems; count = emulateMenuCount;
+      title = "Emulate Tag"; selPtr = &currentSubMenuItem;
       break;
     default: return;
   }
@@ -1959,10 +3178,12 @@ void handleButtonPress() {
     switch (appState) {
       case STATE_MAIN_MENU:     executeMainMenuItem(currentMenuItem);      break;
       case STATE_READ_SUBMENU:  executeReadMenuItem(currentSubMenuItem);   break;
+      case STATE_DEMO_SUBMENU:  executeDemoMenuItem(currentSubMenuItem);   break;
       case STATE_ATTACK_SUBMENU:executeAttackMenuItem(currentSubMenuItem); break;
       case STATE_CLONE_SUBMENU: executeCloneMenuItem(currentSubMenuItem);  break;
       case STATE_WRITE_SUBMENU: executeWriteMenuItem(currentSubMenuItem);  break;
       case STATE_SD_SUBMENU:    executeSDMenuItem(currentSubMenuItem);     break;
+      case STATE_EMULATE_SUBMENU: executeEmulateMenuItem(currentSubMenuItem); break;
     }
   }
 }
@@ -2002,31 +3223,15 @@ void setup() {
 
   initSDCard();
 
-  displayInfo("PN532 NFC", "Initializing...");
-  nfc.begin();
-  delay(1000);
-
-  uint32_t ver = nfc.getFirmwareVersion();
-  while (!ver) {
-    displayInfo("PN532 Not Found", "VCC: pin6 5VOUT", "SDA:G8 SCL:G9", "Select:Retry Back:OS");
-    while (true) {
-      int btn = getButtonInput();
-      if (btn == BUTTON_BACK) returnToLauncher();
-      if (btn == BUTTON_SELECT) break;
-      delay(20);
-    }
-    displayInfo("PN532 NFC", "Retrying...");
-    nfc.begin();
-    delay(500);
-    ver = nfc.getFirmwareVersion();
+  if (initPn532WithAttempts(PN532_BOOT_ATTEMPTS, true)) {
+    displayInfo("PN532 Ready", pn532ChipLine(pn532FirmwareVersion),
+                pn532FirmwareLine(pn532FirmwareVersion));
+    delay(1500);
+  } else {
+    displayInfo("PN532 Missing", "Menu still works",
+                "Select in NFC action", "Back item returns OS");
+    delay(1800);
   }
-
-  String fw   = "FW: " + String((ver >> 16) & 0xFF) + "." + String((ver >> 8) & 0xFF);
-  String chip = "Chip: PN5" + String((ver >> 24) & 0xFF, HEX);
-  displayInfo("PN532 Ready", chip, fw);
-  delay(1500);
-
-  nfc.SAMConfig();
 
   // Init global state — no dump loaded yet
   mifDump.totalBlocks = 0;
@@ -2034,7 +3239,7 @@ void setup() {
   keyMap.crackedCount = 0;
   keyMap.numSectors   = 0;
 
-  displayMenuScreen("CYPHER NFC", mainMenuItems, mainMenuCount, 0);
+  redisplayCurrentMenu();
 }
 
 void loop() {

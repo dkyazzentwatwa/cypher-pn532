@@ -23,26 +23,71 @@
 #include <SD.h>
 #include <SPI.h>
 
+// --- Build profile label ---
+#ifndef APP_DISPLAY_NAME
+#define APP_DISPLAY_NAME "CYPHER NFC"
+#endif
+
 // --- PN532 (I2C) ---
+#ifndef PN532_IRQ
 #define PN532_IRQ    (2)
+#endif
+#ifndef PN532_RESET
 #define PN532_RESET  (3)
+#endif
+
+// --- I2C Bus ---
+#ifndef I2C_SDA_PIN
+#define I2C_SDA_PIN 8
+#endif
+#ifndef I2C_SCL_PIN
+#define I2C_SCL_PIN 9
+#endif
+#ifndef I2C_CLOCK_HZ
+#define I2C_CLOCK_HZ 100000
+#endif
 
 // --- SSD1306 OLED ---
+#ifndef SCREEN_WIDTH
 #define SCREEN_WIDTH     128
+#endif
+#ifndef SCREEN_HEIGHT
 #define SCREEN_HEIGHT     64
+#endif
+#ifndef OLED_RESET
 #define OLED_RESET        -1
+#endif
+#ifndef SSD1306_I2C_ADDR
 #define SSD1306_I2C_ADDR 0x3C
+#endif
 
 // --- SD Card (SPI) ---
+#ifndef SD_CS
 #define SD_CS    10
+#endif
+#ifndef SD_MOSI
 #define SD_MOSI   6
+#endif
+#ifndef SD_MISO
 #define SD_MISO   5
+#endif
+#ifndef SD_SCK
 #define SD_SCK    4
+#endif
 
 // --- Buttons (Active LOW with INPUT_PULLUP) ---
+#ifndef BUTTON_UP
 #define BUTTON_UP      7   // rewired from GPIO 3 (was conflicting with PN532_RESET)
+#endif
+#ifndef BUTTON_DOWN
 #define BUTTON_DOWN    1   // unchanged
+#endif
+#ifndef BUTTON_SELECT
 #define BUTTON_SELECT  0   // rewired from GPIO 2 (was conflicting with PN532_IRQ)
+#endif
+#ifndef BUTTON_NONE
+#define BUTTON_NONE   -1
+#endif
 
 // --- Global Objects ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
@@ -59,7 +104,9 @@ enum AppState {
   STATE_ATTACK_SUBMENU,
   STATE_CLONE_SUBMENU,
   STATE_WRITE_SUBMENU,
-  STATE_SD_SUBMENU
+  STATE_SD_SUBMENU,
+  STATE_DEMO_SUBMENU,
+  STATE_EMULATE_SUBMENU
 };
 
 enum CardType {
@@ -77,8 +124,14 @@ enum CardType {
 // MENU DATA
 // ============================================================
 
-const char* mainMenuItems[]   = { "Scan & Info", "Read Card", "Key Attack", "Clone Card", "Write Card", "SD Card" };
-const int   mainMenuCount     = 6;
+const char* mainMenuItems[]   = { "Scan & Info", "Demo Mode", "Read Card", "Key Attack", "Clone Card", "Write Card", "SD Card", "Emulate Tag" };
+const int   mainMenuCount     = 8;
+
+const char* demoMenuItems[]   = { "Tag Studio", "Dump + Web", "Badge Writer", "Puzzle Hunt", "Back" };
+const int   demoMenuCount     = 5;
+
+const char* emulateMenuItems[] = { "NDEF from SD", "NTAG Dump", "UID Only", "Back" };
+const int   emulateMenuCount   = 4;
 
 const char* readMenuItems[]   = { "UID Only", "Read NDEF", "Dump MIFARE", "Dump NTAG", "Back" };
 const int   readMenuCount     = 5;
@@ -107,6 +160,8 @@ int currentSubMenuItem  = 0;
 String fileList[20];
 int fileCount       = 0;
 int currentFileIndex= 0;
+String lastSavedFilename = "";
+String lastSavedCompanion = "";
 
 // ============================================================
 // DATA STRUCTURES
@@ -149,6 +204,20 @@ struct SectorKeyMap {
   bool    keyBKnown[40];
   int     crackedCount;
   int     numSectors;
+};
+
+struct NDEFDecoded {
+  bool ok;
+  char recordType;
+  String label;
+  String value;
+};
+
+struct NDEFPreset {
+  char recordType;
+  uint8_t prefix;
+  String payload;
+  String label;
 };
 
 // Global NFC data buffers (kept as globals to avoid large stack allocations)
@@ -285,17 +354,20 @@ void displayTitleScreen() {
   display.clearDisplay();
   u8g2_for_adafruit_gfx.setFont(u8g2_font_adventurer_tr);
   u8g2_for_adafruit_gfx.setCursor(10, 40);
-  u8g2_for_adafruit_gfx.print("CYPHER NFC");
+  u8g2_for_adafruit_gfx.print(APP_DISPLAY_NAME);
   display.display();
 }
 
 void redisplayCurrentMenu() {
   switch (appState) {
     case STATE_MAIN_MENU:
-      displayMenuScreen("CYPHER NFC", mainMenuItems, mainMenuCount, currentMenuItem);
+      displayMenuScreen(APP_DISPLAY_NAME, mainMenuItems, mainMenuCount, currentMenuItem);
       break;
     case STATE_READ_SUBMENU:
       displayMenuScreen("Read Card", readMenuItems, readMenuCount, currentSubMenuItem);
+      break;
+    case STATE_DEMO_SUBMENU:
+      displayMenuScreen("Demo Mode", demoMenuItems, demoMenuCount, currentSubMenuItem);
       break;
     case STATE_ATTACK_SUBMENU:
       displayMenuScreen("Key Attack", attackMenuItems, attackMenuCount, currentSubMenuItem);
@@ -308,6 +380,9 @@ void redisplayCurrentMenu() {
       break;
     case STATE_SD_SUBMENU:
       displayMenuScreen("SD Card", sdMenuItems, sdMenuCount, currentSubMenuItem);
+      break;
+    case STATE_EMULATE_SUBMENU:
+      displayMenuScreen("Emulate Tag", emulateMenuItems, emulateMenuCount, currentSubMenuItem);
       break;
   }
 }
@@ -329,7 +404,7 @@ int getButtonInput() {
     delay(200);
     if (digitalRead(BUTTON_SELECT) == LOW) return BUTTON_SELECT;
   }
-  return 0;
+  return BUTTON_NONE;
 }
 
 // Wait for a card, return false if SELECT pressed to cancel
@@ -367,6 +442,7 @@ void initSDCard() {
 
   if (!SD.begin(SD_CS)) {
     displayInfo("SD Error", "Init failed!", "Check SD card");
+    Serial.println("SD init failed");
     delay(2000);
     return;
   }
@@ -374,6 +450,7 @@ void initSDCard() {
   uint8_t cardType = SD.cardType();
   if (cardType == CARD_NONE) {
     displayInfo("SD Error", "No card found");
+    Serial.println("SD card type: none");
     delay(2000);
     return;
   }
@@ -386,6 +463,7 @@ void initSDCard() {
     default:        typeStr = "Unk";  break;
   }
   String sizeStr = String((uint32_t)(SD.cardSize() / (1024 * 1024))) + " MB";
+  Serial.printf("SD ready type=%s size=%s\n", typeStr.c_str(), sizeStr.c_str());
   displayInfo("SD Ready", typeStr, sizeStr);
   delay(1500);
 }
@@ -562,6 +640,104 @@ void hexViewFile() {
 }
 
 // ============================================================
+// LOGGING & TEXT HELPERS
+// ============================================================
+
+String uidToString(const uint8_t* uid, uint8_t uidLength) {
+  String uidStr = "";
+  for (int i = 0; i < uidLength; i++) {
+    if (uid[i] < 0x10) uidStr += "0";
+    uidStr += String(uid[i], HEX);
+    if (i < uidLength - 1) uidStr += ":";
+  }
+  uidStr.toUpperCase();
+  return uidStr;
+}
+
+String csvEscape(const String& value) {
+  bool needsQuotes = value.indexOf(',') >= 0 || value.indexOf('"') >= 0 ||
+                     value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0;
+  if (!needsQuotes) return value;
+  String out = "\"";
+  for (size_t i = 0; i < value.length(); i++) {
+    if (value[i] == '"') out += "\"\"";
+    else out += value[i];
+  }
+  out += "\"";
+  return out;
+}
+
+void appendScanLog(const String& uid, const String& type,
+                   const String& action, const String& filename = "-") {
+  const char* logPath = "/SCANLOG.CSV";
+  bool needsHeader = !SD.exists(logPath);
+  File f = SD.open(logPath, FILE_APPEND);
+  if (!f) return;
+  if (needsHeader) f.println("uptime_ms,uid,type,action,filename");
+  f.print(millis()); f.print(",");
+  f.print(csvEscape(uid)); f.print(",");
+  f.print(csvEscape(type)); f.print(",");
+  f.print(csvEscape(action)); f.print(",");
+  f.println(csvEscape(filename.length() ? filename : "-"));
+  f.close();
+}
+
+String ndefUriPrefix(uint8_t code) {
+  switch (code) {
+    case 0x01: return "http://www.";
+    case 0x02: return "https://www.";
+    case 0x03: return "http://";
+    case 0x04: return "https://";
+    default: return "";
+  }
+}
+
+NDEFPreset parseNDEFPreset(String content) {
+  content.trim();
+  NDEFPreset preset;
+  preset.recordType = 'T';
+  preset.prefix = 0;
+  preset.payload = content;
+  preset.label = "Text";
+
+  String lower = content;
+  lower.toLowerCase();
+  if (lower.startsWith("text:")) {
+    preset.payload = content.substring(5);
+    preset.payload.trim();
+    return preset;
+  }
+
+  if (lower.startsWith("url:")) {
+    preset.recordType = 'U';
+    preset.label = "URL";
+    preset.payload = content.substring(4);
+    preset.payload.trim();
+  }
+
+  if (preset.recordType == 'U') {
+    String urlLower = preset.payload;
+    urlLower.toLowerCase();
+    if (urlLower.startsWith("https://www.")) {
+      preset.prefix = 0x02;
+      preset.payload = preset.payload.substring(12);
+    } else if (urlLower.startsWith("http://www.")) {
+      preset.prefix = 0x01;
+      preset.payload = preset.payload.substring(11);
+    } else if (urlLower.startsWith("https://")) {
+      preset.prefix = 0x04;
+      preset.payload = preset.payload.substring(8);
+    } else if (urlLower.startsWith("http://")) {
+      preset.prefix = 0x03;
+      preset.payload = preset.payload.substring(7);
+    } else {
+      preset.prefix = 0x04;
+    }
+  }
+  return preset;
+}
+
+// ============================================================
 // CARD TYPE DETECTION
 // ============================================================
 
@@ -632,13 +808,8 @@ void scanAndInfo() {
   CardInfo info;
   detectCardType(uid, uidLength, &info);
 
-  String uidStr = "";
-  for (int i = 0; i < uidLength; i++) {
-    if (uid[i] < 0x10) uidStr += "0";
-    uidStr += String(uid[i], HEX);
-    if (i < uidLength - 1) uidStr += ":";
-  }
-  uidStr.toUpperCase();
+  String uidStr = uidToString(uid, uidLength);
+  appendScanLog(uidStr, info.typeName, "scan_info");
 
   displayInfo(info.typeName,
               "UID: " + uidStr.substring(0, 17),
@@ -735,6 +906,8 @@ void dumpMifareClassic(uint8_t* uid, uint8_t uidLength, bool is4K) {
 }
 
 bool saveMifareDumpToSD(bool is4K) {
+  lastSavedFilename = "";
+  lastSavedCompanion = "";
   String mfdName = generateUniqueFilename("dmp", "mfd");
   File mfd = SD.open("/" + mfdName, FILE_WRITE);
   if (!mfd) {
@@ -790,6 +963,8 @@ bool saveMifareDumpToSD(bool is4K) {
     txt.close();
   }
 
+  lastSavedFilename = mfdName;
+  lastSavedCompanion = txtName;
   displayInfo("Saved!", mfdName, txtName);
   delay(2500);
   return true;
@@ -1010,6 +1185,139 @@ bool readNTAGPageRaw(uint8_t page, uint8_t* buf) {
   return true;
 }
 
+bool readNDEFPages(CardInfo* info, int* maxPage, int* readCount, int* failCount) {
+  *maxPage = min((int)info->totalPages, 42);
+  *readCount = 0;
+  *failCount = 0;
+  memset(ntagDump.pageRead, false, sizeof(ntagDump.pageRead));
+  memset(ntagDump.pages, 0, sizeof(ntagDump.pages));
+
+  for (int p = 0; p < *maxPage; p++) {
+    displayProgress("Read NDEF", p + 1, *maxPage, ("Page " + String(p)).c_str());
+    bool ok = readNTAGPageRaw(p, ntagDump.pages[p]);
+    ntagDump.pageRead[p] = ok;
+    if (ok) (*readCount)++;
+    else (*failCount)++;
+    delay(5);
+  }
+  ntagDump.totalPages = *maxPage;
+  strncpy(ntagDump.typeName, info->typeName, sizeof(ntagDump.typeName));
+  return *readCount > 0;
+}
+
+String bytesToString(const uint8_t* data, int len) {
+  String out = "";
+  for (int i = 0; i < len; i++) {
+    char c = (char)data[i];
+    if (c >= 0x20 && c < 0x7F) out += c;
+  }
+  return out;
+}
+
+bool decodeCachedNDEF(int maxPage, NDEFDecoded* decoded) {
+  decoded->ok = false;
+  decoded->recordType = 0;
+  decoded->label = "Raw NDEF";
+  decoded->value = "";
+
+  uint8_t buf[160];
+  int len = 0;
+  for (int p = 4; p < maxPage && len + 4 <= (int)sizeof(buf); p++) {
+    for (int j = 0; j < 4; j++) buf[len++] = ntagDump.pageRead[p] ? ntagDump.pages[p][j] : 0;
+  }
+
+  for (int i = 0; i < len;) {
+    uint8_t tlv = buf[i++];
+    if (tlv == 0x00) continue;
+    if (tlv == 0xFE) break;
+    if (tlv != 0x03 || i >= len) continue;
+
+    int tlvLen = buf[i++];
+    if (tlvLen == 0xFF) {
+      if (i + 1 >= len) return false;
+      tlvLen = ((int)buf[i] << 8) | buf[i + 1];
+      i += 2;
+    }
+    if (tlvLen <= 0 || i + tlvLen > len) return false;
+
+    int r = i;
+    uint8_t flags = buf[r++];
+    if ((flags & 0x10) == 0) return false; // short records only
+    uint8_t typeLen = buf[r++];
+    uint8_t payloadLen = buf[r++];
+    uint8_t idLen = 0;
+    if (flags & 0x08) idLen = buf[r++];
+    if (typeLen != 1 || r + typeLen + idLen + payloadLen > i + tlvLen) return false;
+    char type = (char)buf[r++];
+    r += idLen;
+
+    if (type == 'U' && payloadLen >= 1) {
+      decoded->ok = true;
+      decoded->recordType = 'U';
+      decoded->label = "NDEF URL";
+      decoded->value = ndefUriPrefix(buf[r]) + bytesToString(&buf[r + 1], payloadLen - 1);
+      return true;
+    }
+    if (type == 'T' && payloadLen >= 1) {
+      uint8_t status = buf[r++];
+      int langLen = status & 0x3F;
+      if (payloadLen < 1 + langLen) return false;
+      decoded->ok = true;
+      decoded->recordType = 'T';
+      decoded->label = "NDEF Text";
+      decoded->value = bytesToString(&buf[r + langLen], payloadLen - 1 - langLen);
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+void showRawNDEFPages(const String& title, int maxPage) {
+  int viewPage = 0;
+  while (true) {
+    display.clearDisplay();
+    drawBorder();
+    display.setCursor(4, 4);
+    display.println(title);
+    display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
+
+    for (int row = 0; row < 4 && (viewPage + row) < maxPage; row++) {
+      int p = viewPage + row;
+      display.setCursor(4, 18 + row * 10);
+      display.print(p < 10 ? "P0" : "P"); display.print(p); display.print(":");
+      if (ntagDump.pageRead[p]) {
+        for (int j = 0; j < 4; j++) {
+          if (ntagDump.pages[p][j] < 0x10) display.print("0");
+          display.print(ntagDump.pages[p][j], HEX); display.print(" ");
+        }
+      } else {
+        display.print("-- -- -- --");
+      }
+    }
+    display.setCursor(4, 56);
+    display.println("U/D:Scroll S:Exit");
+    display.display();
+
+    int btn = getButtonInput();
+    if (btn == BUTTON_DOWN && viewPage + 4 < maxPage) viewPage += 4;
+    if (btn == BUTTON_UP   && viewPage > 0)           viewPage -= 4;
+    if (btn == BUTTON_SELECT) break;
+    delay(50);
+  }
+}
+
+void showDecodedNDEFOrRaw(CardInfo* info, int maxPage, NDEFDecoded* decoded) {
+  if (decoded->ok) {
+    displayInfo(decoded->label,
+                decoded->value.substring(0, 20),
+                decoded->value.substring(20, 40),
+                "Select:Raw");
+    while (getButtonInput() != BUTTON_SELECT) delay(40);
+  }
+  showRawNDEFPages(String(info->typeName) + " NDEF", maxPage);
+}
+
 void dumpNTAG(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
   memcpy(ntagDump.uid, uid, uidLength);
   ntagDump.uidLength  = uidLength;
@@ -1032,6 +1340,8 @@ void dumpNTAG(uint8_t* uid, uint8_t uidLength, CardInfo* info) {
 }
 
 void saveNTAGDumpToSD() {
+  lastSavedFilename = "";
+  lastSavedCompanion = "";
   String binName = generateUniqueFilename("ntg", "bin");
   File f = SD.open("/" + binName, FILE_WRITE);
   if (!f) {
@@ -1079,6 +1389,8 @@ void saveNTAGDumpToSD() {
     t.close();
   }
 
+  lastSavedFilename = binName;
+  lastSavedCompanion = txtName;
   displayInfo("Saved!", binName, txtName);
   delay(2500);
 }
@@ -1097,46 +1409,18 @@ void readNDEF() {
     return;
   }
 
-  int maxPage = min((int)info.totalPages, 42);
-  displayInfo("Reading NDEF", "Pages 0-" + String(maxPage - 1), "Please wait...");
-
-  for (int p = 0; p < maxPage; p++) {
-    ntagDump.pageRead[p] = readNTAGPageRaw(p, ntagDump.pages[p]);
-    delay(2);
-  }
-  ntagDump.totalPages = maxPage;
+  int maxPage = 0;
+  int readCount = 0;
+  int failCount = 0;
+  readNDEFPages(&info, &maxPage, &readCount, &failCount);
   ntagDump.uidLength  = uidLength;
   memcpy(ntagDump.uid, uid, uidLength);
-  strncpy(ntagDump.typeName, info.typeName, sizeof(ntagDump.typeName));
 
-  // Scrollable OLED view
-  int viewPage = 0;
-  while (true) {
-    display.clearDisplay();
-    drawBorder();
-    display.setCursor(4, 4);
-    display.println(String(info.typeName) + " NDEF");
-    display.drawLine(0, 14, SCREEN_WIDTH, 14, SSD1306_WHITE);
-
-    for (int row = 0; row < 4 && (viewPage + row) < maxPage; row++) {
-      int p = viewPage + row;
-      display.setCursor(4, 18 + row * 10);
-      display.print(p < 10 ? "P0" : "P"); display.print(p); display.print(":");
-      for (int j = 0; j < 4; j++) {
-        if (ntagDump.pages[p][j] < 0x10) display.print("0");
-        display.print(ntagDump.pages[p][j], HEX); display.print(" ");
-      }
-    }
-    display.setCursor(4, 56);
-    display.println("U/D:Scroll S:Exit");
-    display.display();
-
-    int btn = getButtonInput();
-    if (btn == BUTTON_DOWN && viewPage + 4 < maxPage) viewPage += 4;
-    if (btn == BUTTON_UP   && viewPage > 0)           viewPage -= 4;
-    if (btn == BUTTON_SELECT) break;
-    delay(50);
-  }
+  NDEFDecoded decoded;
+  decodeCachedNDEF(maxPage, &decoded);
+  appendScanLog(uidToString(uid, uidLength), info.typeName,
+                decoded.ok ? "read_ndef_decoded" : "read_ndef_raw");
+  showDecodedNDEFOrRaw(&info, maxPage, &decoded);
   delay(200);
   redisplayCurrentMenu();
 }
@@ -1237,9 +1521,11 @@ String loadNDEFPreset(const char* filename, const String& defaultVal) {
 // recordType: 'U' (URI) or 'T' (Text)
 // For 'U': prefix = URI identifier code (0x04 = https://)
 // For 'T': prefix is ignored; lang code "en" is used
-bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
-                        char recordType, uint8_t prefix,
-                        const char* payload) {
+// Build a TLV-wrapped NDEF message into msg[] (must hold >=128 bytes).
+// recordType: 'U' (URI) or 'T' (Text). Returns total byte count.
+// Shared by buildAndWriteNDEF() (writing a card) and the tag emulator.
+int buildNDEFMessage(char recordType, uint8_t prefix,
+                     const char* payload, uint8_t* msg) {
   // Build the record type-specific payload bytes
   uint8_t pld[64];
   int pldLen = 0;
@@ -1261,7 +1547,6 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
   // NDEF TLV wrapper:
   // [0x03][TLV_len][0xD1][0x01][pldLen][type_char][pld...][0xFE]
   // TLV_len = 4 (record header) + pldLen
-  uint8_t msg[128] = {0};
   int idx = 0;
   msg[idx++] = 0x03;                    // NDEF Message TLV tag
   msg[idx++] = (uint8_t)(4 + pldLen);  // TLV length
@@ -1272,8 +1557,15 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
   memcpy(&msg[idx], pld, pldLen);
   idx += pldLen;
   msg[idx++] = 0xFE;                    // Terminator TLV
+  return idx;
+}
 
-  int totalBytes = idx;
+bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
+                        char recordType, uint8_t prefix,
+                        const char* payload) {
+  uint8_t msg[128] = {0};
+  int totalBytes = buildNDEFMessage(recordType, prefix, payload, msg);
+
   if (totalBytes > 120) {
     displayInfo("Too Long!", "Max 120 bytes", "Shorten content");
     delay(3000);
@@ -1297,7 +1589,9 @@ bool buildAndWriteNDEF(uint8_t* uid, uint8_t uidLength,
 void writeNDEFUrl() {
   String url = loadNDEFPreset("/NDEF_URL.TXT",
                               "github.com/dkyazzentwatwa/cypher-pn532");
-  displayInfo("NDEF URL", url.substring(0, 20), "Place NTAG card");
+  NDEFPreset preset = parseNDEFPreset(String("url:") + url);
+  String visible = ndefUriPrefix(preset.prefix) + preset.payload;
+  displayInfo("NDEF URL", visible.substring(0, 20), "Place NTAG card");
   delay(2000);
 
   uint8_t uid[7]; uint8_t uidLength;
@@ -1306,8 +1600,9 @@ void writeNDEFUrl() {
   }
 
   displayInfo("Writing URL...");
-  bool ok = buildAndWriteNDEF(uid, uidLength, 'U', 0x04, url.c_str()); // 0x04 = https://
-  displayInfo(ok ? "URL Written!" : "Write Failed", url.substring(0, 20),
+  bool ok = buildAndWriteNDEF(uid, uidLength, 'U', preset.prefix, preset.payload.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG", ok ? "write_url" : "write_url_failed", "NDEF_URL.TXT");
+  displayInfo(ok ? "URL Written!" : "Write Failed", visible.substring(0, 20),
               ok ? "Scan with phone!" : "");
   delay(2500);
   redisplayCurrentMenu();
@@ -1325,6 +1620,7 @@ void writeNDEFText() {
 
   displayInfo("Writing Text...");
   bool ok = buildAndWriteNDEF(uid, uidLength, 'T', 0, text.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG", ok ? "write_text" : "write_text_failed", "NDEF_TXT.TXT");
   displayInfo(ok ? "Text Written!" : "Write Failed", text.substring(0, 20));
   delay(2500);
   redisplayCurrentMenu();
@@ -1343,11 +1639,14 @@ void writeNDEFFromSD() {
     return;
   }
   String content = "";
-  while (f.available() && content.length() < 58) content += (char)f.read();
+  while (f.available() && content.length() < 90) content += (char)f.read();
   f.close();
   content.trim();
+  NDEFPreset preset = parseNDEFPreset(content);
+  String visible = (preset.recordType == 'U') ? ndefUriPrefix(preset.prefix) + preset.payload : preset.payload;
 
-  displayInfo("Writing as Text", content.substring(0, 20), "Place NTAG card");
+  displayInfo(preset.recordType == 'U' ? "Writing as URL" : "Writing as Text",
+              visible.substring(0, 20), "Place NTAG card");
   delay(2000);
 
   uint8_t uid[7]; uint8_t uidLength;
@@ -1355,8 +1654,11 @@ void writeNDEFFromSD() {
     redisplayCurrentMenu(); return;
   }
 
-  bool ok = buildAndWriteNDEF(uid, uidLength, 'T', 0, content.c_str());
-  displayInfo(ok ? "Written!" : "Failed", content.substring(0, 20));
+  bool ok = buildAndWriteNDEF(uid, uidLength, preset.recordType, preset.prefix, preset.payload.c_str());
+  appendScanLog(uidToString(uid, uidLength), "NTAG",
+                ok ? (preset.recordType == 'U' ? "write_sd_url" : "write_sd_text") : "write_sd_failed",
+                fileList[currentFileIndex]);
+  displayInfo(ok ? "Written!" : "Failed", visible.substring(0, 20));
   delay(2500);
   redisplayCurrentMenu();
 }
@@ -1372,13 +1674,8 @@ void readUIDOnly() {
   CardInfo info;
   detectCardType(uid, uidLength, &info);
 
-  String uidStr = "";
-  for (int i = 0; i < uidLength; i++) {
-    if (uid[i] < 0x10) uidStr += "0";
-    uidStr += String(uid[i], HEX);
-    if (i < uidLength - 1) uidStr += ":";
-  }
-  uidStr.toUpperCase();
+  String uidStr = uidToString(uid, uidLength);
+  appendScanLog(uidStr, info.typeName, "uid_only");
 
   Serial.print("TYPE: "); Serial.println(info.typeName);
   Serial.print("UID:  "); Serial.println(uidStr);
@@ -1408,7 +1705,9 @@ void dumpMifareFlow() {
 
   bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
   dumpMifareClassic(uid, uidLength, is4K);
-  saveMifareDumpToSD(is4K);
+  if (saveMifareDumpToSD(is4K)) {
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_mifare", lastSavedFilename);
+  }
   redisplayCurrentMenu();
 }
 
@@ -1429,6 +1728,7 @@ void dumpNTAGFlow() {
 
   dumpNTAG(uid, uidLength, &info);
   saveNTAGDumpToSD();
+  appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_ntag", lastSavedFilename);
   redisplayCurrentMenu();
 }
 
@@ -1445,15 +1745,377 @@ void dumpToSDFlow() {
   if (info.type == CARD_MIFARE_CLASSIC_1K || info.type == CARD_MIFARE_CLASSIC_4K) {
     bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
     dumpMifareClassic(uid, uidLength, is4K);
-    saveMifareDumpToSD(is4K);
+    if (saveMifareDumpToSD(is4K)) {
+      appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_auto", lastSavedFilename);
+    }
   } else if (info.totalPages > 0) {
     dumpNTAG(uid, uidLength, &info);
     saveNTAGDumpToSD();
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "dump_auto", lastSavedFilename);
   } else {
     displayInfo("Unknown Card", "Cannot dump", info.typeName);
     delay(3000);
   }
   redisplayCurrentMenu();
+}
+
+// ============================================================
+// DEMO MODE
+// ============================================================
+
+void waitForSelectExit() {
+  while (getButtonInput() != BUTTON_SELECT) delay(40);
+}
+
+void tagStudioFlow(bool puzzleMode) {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength)) { redisplayCurrentMenu(); return; }
+
+  CardInfo info;
+  detectCardType(uid, uidLength, &info);
+  String uidStr = uidToString(uid, uidLength);
+  String action = puzzleMode ? "puzzle_hunt" : "tag_studio";
+
+  if (info.totalPages > 0) {
+    int maxPage = 0, readCount = 0, failCount = 0;
+    readNDEFPages(&info, &maxPage, &readCount, &failCount);
+    ntagDump.uidLength = uidLength;
+    memcpy(ntagDump.uid, uid, uidLength);
+    NDEFDecoded decoded;
+    decodeCachedNDEF(maxPage, &decoded);
+    appendScanLog(uidStr, info.typeName, action, decoded.ok ? decoded.label : "raw");
+
+    if (puzzleMode && decoded.ok) {
+      String clue = decoded.value;
+      String lower = clue;
+      lower.toLowerCase();
+      if (lower.startsWith("clue:")) clue = clue.substring(5);
+      else if (lower.startsWith("puzzle:")) clue = clue.substring(7);
+      clue.trim();
+      displayInfo("Puzzle Hunt", clue.substring(0, 20), clue.substring(20, 40), "Select:Exit");
+      waitForSelectExit();
+    } else if (decoded.ok) {
+      displayInfo("Tag Studio", decoded.label,
+                  decoded.value.substring(0, 20),
+                  decoded.value.substring(20, 40));
+      delay(3500);
+    } else {
+      displayInfo("Tag Studio", info.typeName, "No decoded NDEF", uidStr.substring(0, 20));
+      delay(3000);
+    }
+  } else {
+    appendScanLog(uidStr, info.typeName, action);
+    displayInfo(puzzleMode ? "Puzzle Hunt" : "Tag Studio",
+                info.typeName,
+                "UID: " + uidStr.substring(0, 17),
+                info.totalBlocks ? String(info.totalBlocks) + " blocks" : "No NDEF");
+    delay(3500);
+  }
+  redisplayCurrentMenu();
+}
+
+void demoDumpWebFlow() {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength)) { redisplayCurrentMenu(); return; }
+
+  CardInfo info;
+  detectCardType(uid, uidLength, &info);
+  displayInfo("Dump + Web", info.typeName, "Saving to SD...");
+  delay(1000);
+
+  if (info.type == CARD_MIFARE_CLASSIC_1K || info.type == CARD_MIFARE_CLASSIC_4K) {
+    bool is4K = (info.type == CARD_MIFARE_CLASSIC_4K);
+    dumpMifareClassic(uid, uidLength, is4K);
+    if (saveMifareDumpToSD(is4K)) {
+      appendScanLog(uidToString(uid, uidLength), info.typeName, "demo_dump_web", lastSavedFilename);
+    }
+  } else if (info.totalPages > 0) {
+    dumpNTAG(uid, uidLength, &info);
+    saveNTAGDumpToSD();
+    appendScanLog(uidToString(uid, uidLength), info.typeName, "demo_dump_web", lastSavedFilename);
+  } else {
+    displayInfo("Unknown Card", "Cannot dump", info.typeName);
+    delay(3000);
+    redisplayCurrentMenu();
+    return;
+  }
+
+  displayInfo("Dump Saved", lastSavedFilename, "View on SD card", "Select:Exit");
+  waitForSelectExit();
+  redisplayCurrentMenu();
+}
+
+// ============================================================
+// CARD EMULATION (ISO14443A target mode — NTAG / Type 2 tag)
+//
+// The PN532 can present itself as a tag via TgInitAsTarget (0x8C) +
+// TgGetData (0x86) / TgSetData (0x8E). Adafruit_PN532 doesn't expose the
+// target-mode response read (readdata is private), so we drive the chip with
+// our own raw-I2C frame helpers below and keep Adafruit_PN532 for everything
+// else on the same bus.
+//
+// LIMITATION: MIFARE Classic emulation is NOT possible — the PN532 firmware
+// can't run Crypto1 auth as a target. This emulates an NTAG-style Type 2 tag
+// that a phone reads as NDEF. The RF UID is partly chip-generated (only 3
+// NFCID1 bytes are controllable), so "UID Only" is a best-effort spoof.
+// ============================================================
+
+#define PN532_I2C_ADDRESS 0x24   // 7-bit address (0x48 >> 1)
+
+#define EMU_MAX_PAGES 64                       // covers NTAG213 (45 pp) + NDEF
+static uint8_t emuPageImage[EMU_MAX_PAGES * 4];
+static int     emuPageCount = 0;
+
+// Send a command (TFI 0xD4 is prepended here) and verify the 6-byte ACK.
+bool pn532_sendCmd(const uint8_t* cmd, uint8_t len) {
+  uint8_t lenField = len + 1;                  // TFI + cmd bytes
+  Wire.beginTransmission(PN532_I2C_ADDRESS);
+  Wire.write((uint8_t)0x00);                   // preamble
+  Wire.write((uint8_t)0x00);                   // start 1
+  Wire.write((uint8_t)0xFF);                   // start 2
+  Wire.write(lenField);
+  Wire.write((uint8_t)(~lenField + 1));        // length checksum
+  Wire.write((uint8_t)0xD4);                   // TFI: host -> PN532
+  uint8_t sum = 0xD4;
+  for (uint8_t i = 0; i < len; i++) { Wire.write(cmd[i]); sum += cmd[i]; }
+  Wire.write((uint8_t)(~sum + 1));             // data checksum
+  Wire.write((uint8_t)0x00);                   // postamble
+  if (Wire.endTransmission() != 0) return false;
+
+  // Read the ACK frame (00 00 FF 00 FF 00), preceded by an I2C ready byte.
+  uint32_t start = millis();
+  while (millis() - start < 100) {
+    Wire.requestFrom((uint8_t)PN532_I2C_ADDRESS, (uint8_t)7);
+    if (Wire.available() >= 7) {
+      uint8_t rdy = Wire.read();
+      uint8_t a[6];
+      for (int i = 0; i < 6; i++) a[i] = Wire.read();
+      if ((rdy & 0x01) && a[0] == 0x00 && a[1] == 0x00 && a[2] == 0xFF &&
+          a[3] == 0x00 && a[4] == 0xFF) return true;
+      return false;
+    }
+    delay(2);
+  }
+  return false;
+}
+
+// Read a response frame; returns payload length (cmd-response bytes, excluding
+// TFI 0xD5 and the response-code byte) into buf, or -1 on timeout/error.
+int pn532_readResp(uint8_t* buf, uint8_t maxLen, uint16_t timeoutMs) {
+  uint32_t start = millis();
+  // Poll the 1-byte ready status.
+  while (millis() - start < timeoutMs) {
+    Wire.requestFrom((uint8_t)PN532_I2C_ADDRESS, (uint8_t)1);
+    if (Wire.available() && (Wire.read() & 0x01)) break;
+    if (millis() - start >= timeoutMs) return -1;
+    delay(3);
+  }
+  // Read the full frame: ready + 00 00 FF LEN LCS D5 RC <data..> DCS 00
+  uint8_t want = maxLen + 10;
+  Wire.requestFrom((uint8_t)PN532_I2C_ADDRESS, want);
+  if (Wire.available() < 8) { while (Wire.available()) Wire.read(); return -1; }
+  Wire.read();                                  // ready byte
+  uint8_t p0 = Wire.read(), p1 = Wire.read(), p2 = Wire.read();
+  if (!(p0 == 0x00 && p1 == 0x00 && p2 == 0xFF)) {
+    while (Wire.available()) Wire.read(); return -1;
+  }
+  uint8_t len = Wire.read();
+  uint8_t lcs = Wire.read();
+  if (((len + lcs) & 0xFF) != 0 || len < 2) {
+    while (Wire.available()) Wire.read(); return -1;
+  }
+  Wire.read();                                  // TFI 0xD5
+  Wire.read();                                  // response code (cmd+1)
+  int dataLen = len - 2;                        // exclude TFI + response code
+  int n = 0;
+  for (int i = 0; i < dataLen && Wire.available(); i++) {
+    uint8_t b = Wire.read();
+    if (n < maxLen) buf[n++] = b;
+  }
+  while (Wire.available()) Wire.read();          // drain DCS + postamble
+  return n;
+}
+
+// Configure the PN532 as a passive ISO14443A (Type 2) target.
+// Returns true once a reader has activated it.
+bool emuInitAsTarget(const uint8_t* uid3, uint16_t timeoutMs) {
+  uint8_t cmd[] = {
+    0x8C,                                  // TgInitAsTarget
+    0x05,                                  // Mode: PICC-only + passive-only
+    0x04, 0x00,                            // SENS_RES (ATQA)
+    uid3[0], uid3[1], uid3[2],             // NFCID1t (3 controllable UID bytes)
+    0x00,                                  // SEL_RES (SAK) 0x00 = Type 2 / NTAG
+    // FeliCa params (NFCID2 8 + PAD 8 + system code 2) — unused but required
+    0x01, 0xFE, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+    0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7,
+    0xFF, 0xFF,
+    // NFCID3t (10 bytes)
+    0xAA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,                                  // length of general bytes
+    0x00                                   // length of historical bytes
+  };
+  if (!pn532_sendCmd(cmd, sizeof(cmd))) return false;
+  uint8_t resp[64];
+  // Response arrives only once a reader selects us (Mode byte + initiator cmd).
+  return pn532_readResp(resp, sizeof(resp), timeoutMs) >= 0;
+}
+
+// One TgGetData (0x86): read the reader's command into buf. Returns length.
+int emuGetData(uint8_t* buf, uint8_t maxLen, uint16_t timeoutMs) {
+  uint8_t cmd = 0x86;
+  if (!pn532_sendCmd(&cmd, 1)) return -1;
+  int n = pn532_readResp(buf, maxLen, timeoutMs);
+  if (n < 1) return -1;
+  // buf[0] is the TgGetData status byte; shift it off, leaving reader payload.
+  uint8_t status = buf[0];
+  for (int i = 1; i < n; i++) buf[i - 1] = buf[i];
+  n -= 1;
+  if (status & 0x3F) return -1;                 // RF error / field lost
+  return n;
+}
+
+// One TgSetData (0x8E): send our response payload back to the reader.
+bool emuSetData(const uint8_t* data, uint8_t len) {
+  uint8_t cmd[1 + 32];
+  cmd[0] = 0x8E;
+  for (uint8_t i = 0; i < len && i < 32; i++) cmd[1 + i] = data[i];
+  if (!pn532_sendCmd(cmd, 1 + len)) return false;
+  uint8_t resp[8];
+  return pn532_readResp(resp, sizeof(resp), 200) >= 0;
+}
+
+// Serve the prebuilt emuPageImage as a Type 2 tag until SELECT is pressed.
+void runType2Emulation(const String& sourceLabel, const uint8_t* uid3) {
+  displayInfo("Emulating Tag", sourceLabel, "Tap phone now", "SELECT: exit");
+  appendScanLog(uidToString(uid3, 3), "NTAG", "emulate", sourceLabel);
+
+  int bytes = emuPageCount * 4;
+  while (digitalRead(BUTTON_SELECT) != LOW) {
+    // (Re)enter target mode; short timeout so we can poll the exit button.
+    if (!emuInitAsTarget(uid3, 1500)) { delay(20); continue; }
+
+    // Serve reader commands until the field drops or SELECT is pressed.
+    while (digitalRead(BUTTON_SELECT) != LOW) {
+      uint8_t in[64];
+      int n = emuGetData(in, sizeof(in), 600);
+      if (n < 1) break;                          // field lost -> re-init
+      if (in[0] == 0x30 && n >= 2) {             // Type 2 READ <page>
+        uint8_t page = in[1];
+        uint8_t out[16];
+        for (int i = 0; i < 16; i++)
+          out[i] = emuPageImage[((page * 4) + i) % bytes];
+        emuSetData(out, 16);
+      } else if (in[0] == 0x50) {                // HALT
+        break;
+      } else {
+        emuSetData(NULL, 0);                     // NAK / ignore others
+      }
+    }
+  }
+  delay(250);                                    // debounce the exit press
+  displayInfo("Emulation", "Stopped");
+  delay(1200);
+  redisplayCurrentMenu();
+}
+
+// Reset emuPageImage and lay down the standard NTAG header (UID + CC).
+// uid3 receives the 3 controllable UID bytes used for the RF anticollision.
+static void emuPrepareHeader(const uint8_t* uid, uint8_t uidLen, uint8_t* uid3) {
+  memset(emuPageImage, 0, sizeof(emuPageImage));
+  uid3[0] = uidLen > 0 ? uid[0] : 0x04;
+  uid3[1] = uidLen > 1 ? uid[1] : 0x12;
+  uid3[2] = uidLen > 2 ? uid[2] : 0x34;
+  // Pages 0-2: UID + BCC + internal (cosmetic; phones read NDEF, not UID here)
+  emuPageImage[0] = uid3[0];
+  emuPageImage[1] = uid3[1];
+  emuPageImage[2] = uid3[2];
+  emuPageImage[3] = uid3[0] ^ uid3[1] ^ uid3[2] ^ 0x88;
+  // Page 3: Capability Container — NTAG213, 144-byte user area, read/write
+  emuPageImage[12] = 0xE1;
+  emuPageImage[13] = 0x10;
+  emuPageImage[14] = 0x12;
+  emuPageImage[15] = 0x00;
+}
+
+// Source 1: NDEF built from the SD presets (/NDEF_URL.TXT or /NDEF_TXT.TXT).
+void emulateNdefFromSD() {
+  String url  = loadNDEFPreset("/NDEF_URL.TXT", "");
+  String text = loadNDEFPreset("/NDEF_TXT.TXT", "");
+  NDEFPreset preset = (url.length() > 0)
+      ? parseNDEFPreset(String("url:") + url)
+      : parseNDEFPreset(String("text:") + (text.length() ? text : String("CYPHER NFC 2026")));
+
+  uint8_t msg[128] = {0};
+  int totalBytes = buildNDEFMessage(preset.recordType, preset.prefix,
+                                    preset.payload.c_str(), msg);
+  // Lay NDEF into the user area from page 4 onward.
+  if (totalBytes > (EMU_MAX_PAGES - 4) * 4) totalBytes = (EMU_MAX_PAGES - 4) * 4;
+
+  uint8_t uid3[3];
+  uint8_t noUid[1] = {0};
+  emuPrepareHeader(noUid, 0, uid3);             // synthetic UID
+  memcpy(&emuPageImage[16], msg, totalBytes);   // page 4 = byte offset 16
+  emuPageCount = 4 + ((totalBytes + 3) / 4) + 1;
+  if (emuPageCount > EMU_MAX_PAGES) emuPageCount = EMU_MAX_PAGES;
+
+  String label = (preset.recordType == 'U') ? "NDEF URL" : "NDEF Text";
+  runType2Emulation(label, uid3);
+}
+
+// Source 2: replay a saved NTAG dump (.bin = sequential 4-byte pages).
+void emulateNtagDumpFromSD() {
+  if (!browseFiles(".bin")) { redisplayCurrentMenu(); return; }
+  String shortName = fileList[currentFileIndex];
+  File f = SD.open("/" + shortName, FILE_READ);
+  if (!f) {
+    displayInfo("Error", "Cannot open", shortName);
+    delay(2000); redisplayCurrentMenu(); return;
+  }
+  memset(emuPageImage, 0, sizeof(emuPageImage));
+  int n = f.read(emuPageImage, sizeof(emuPageImage));
+  f.close();
+  if (n < 16) {
+    displayInfo("Error", "Dump too small", shortName);
+    delay(2000); redisplayCurrentMenu(); return;
+  }
+  emuPageCount = n / 4;
+  uint8_t uid3[3] = { emuPageImage[0], emuPageImage[1], emuPageImage[2] };
+  runType2Emulation(shortName.substring(0, 14), uid3);
+}
+
+// Source 3: spoof a UID from a live scan; empty NDEF body.
+void emulateUidOnly() {
+  uint8_t uid[7]; uint8_t uidLength;
+  if (!waitForCard(uid, &uidLength, "Scan UID to", "emulate")) {
+    redisplayCurrentMenu(); return;
+  }
+  uint8_t uid3[3];
+  emuPrepareHeader(uid, uidLength, uid3);
+  // Empty NDEF message TLV so a reader sees a valid (blank) tag.
+  emuPageImage[16] = 0x03;                       // NDEF TLV, length 0
+  emuPageImage[17] = 0x00;
+  emuPageImage[18] = 0xFE;                        // terminator
+  emuPageCount = 6;
+  runType2Emulation("UID: " + uidToString(uid, uidLength).substring(0, 11), uid3);
+}
+
+void executeEmulateMenuItem(int idx) {
+  switch (idx) {
+    case 0: emulateNdefFromSD();      break;
+    case 1: emulateNtagDumpFromSD();  break;
+    case 2: emulateUidOnly();         break;
+    case 3: appState = STATE_MAIN_MENU; redisplayCurrentMenu(); break;
+  }
+}
+
+void executeDemoMenuItem(int idx) {
+  switch (idx) {
+    case 0: tagStudioFlow(false); break;
+    case 1: demoDumpWebFlow(); break;
+    case 2: writeNDEFFromSD(); break;
+    case 3: tagStudioFlow(true); break;
+    case 4: appState = STATE_MAIN_MENU; redisplayCurrentMenu(); break;
+  }
 }
 
 // ============================================================
@@ -1516,24 +2178,32 @@ void executeMainMenuItem(int idx) {
       scanAndInfo();
       break;
     case 1:
+      appState = STATE_DEMO_SUBMENU; currentSubMenuItem = 0;
+      displayMenuScreen("Demo Mode", demoMenuItems, demoMenuCount, 0);
+      break;
+    case 2:
       appState = STATE_READ_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Read Card", readMenuItems, readMenuCount, 0);
       break;
-    case 2:
+    case 3:
       appState = STATE_ATTACK_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Key Attack", attackMenuItems, attackMenuCount, 0);
       break;
-    case 3:
+    case 4:
       appState = STATE_CLONE_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Clone Card", cloneMenuItems, cloneMenuCount, 0);
       break;
-    case 4:
+    case 5:
       appState = STATE_WRITE_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("Write Card", writeMenuItems, writeMenuCount, 0);
       break;
-    case 5:
+    case 6:
       appState = STATE_SD_SUBMENU; currentSubMenuItem = 0;
       displayMenuScreen("SD Card", sdMenuItems, sdMenuCount, 0);
+      break;
+    case 7:
+      appState = STATE_EMULATE_SUBMENU; currentSubMenuItem = 0;
+      displayMenuScreen("Emulate Tag", emulateMenuItems, emulateMenuCount, 0);
       break;
   }
 }
@@ -1544,7 +2214,7 @@ void executeMainMenuItem(int idx) {
 
 void handleButtonPress() {
   int btn = getButtonInput();
-  if (btn == 0) return;
+  if (btn == BUTTON_NONE) return;
 
   // Resolve active menu context
   const char** items  = nullptr;
@@ -1555,11 +2225,15 @@ void handleButtonPress() {
   switch (appState) {
     case STATE_MAIN_MENU:
       items = (const char**)mainMenuItems; count = mainMenuCount;
-      title = "CYPHER NFC"; selPtr = &currentMenuItem;
+      title = APP_DISPLAY_NAME; selPtr = &currentMenuItem;
       break;
     case STATE_READ_SUBMENU:
       items = (const char**)readMenuItems; count = readMenuCount;
       title = "Read Card"; selPtr = &currentSubMenuItem;
+      break;
+    case STATE_DEMO_SUBMENU:
+      items = (const char**)demoMenuItems; count = demoMenuCount;
+      title = "Demo Mode"; selPtr = &currentSubMenuItem;
       break;
     case STATE_ATTACK_SUBMENU:
       items = (const char**)attackMenuItems; count = attackMenuCount;
@@ -1577,6 +2251,10 @@ void handleButtonPress() {
       items = (const char**)sdMenuItems; count = sdMenuCount;
       title = "SD Card"; selPtr = &currentSubMenuItem;
       break;
+    case STATE_EMULATE_SUBMENU:
+      items = (const char**)emulateMenuItems; count = emulateMenuCount;
+      title = "Emulate Tag"; selPtr = &currentSubMenuItem;
+      break;
     default: return;
   }
 
@@ -1590,10 +2268,12 @@ void handleButtonPress() {
     switch (appState) {
       case STATE_MAIN_MENU:     executeMainMenuItem(currentMenuItem);      break;
       case STATE_READ_SUBMENU:  executeReadMenuItem(currentSubMenuItem);   break;
+      case STATE_DEMO_SUBMENU:  executeDemoMenuItem(currentSubMenuItem);   break;
       case STATE_ATTACK_SUBMENU:executeAttackMenuItem(currentSubMenuItem); break;
       case STATE_CLONE_SUBMENU: executeCloneMenuItem(currentSubMenuItem);  break;
       case STATE_WRITE_SUBMENU: executeWriteMenuItem(currentSubMenuItem);  break;
       case STATE_SD_SUBMENU:    executeSDMenuItem(currentSubMenuItem);     break;
+      case STATE_EMULATE_SUBMENU: executeEmulateMenuItem(currentSubMenuItem); break;
     }
   }
 }
@@ -1607,6 +2287,7 @@ void initDisplay() {
     Serial.println("SSD1306 init failed");
     for (;;);
   }
+  Serial.printf("SSD1306 ready address=0x%02X size=%dx%d\n", SSD1306_I2C_ADDR, SCREEN_WIDTH, SCREEN_HEIGHT);
   display.display();
   delay(500);
   display.clearDisplay();
@@ -1614,8 +2295,15 @@ void initDisplay() {
 
 void setup() {
   Serial.begin(115200);
-  Wire.begin(8, 9);      // SDA=8, SCL=9
-  Wire.setClock(100000); // 100 kHz
+  Serial.println();
+  Serial.print(APP_DISPLAY_NAME);
+  Serial.println(" boot");
+  Serial.printf("I2C SDA=%d SCL=%d clock=%lu\n", I2C_SDA_PIN, I2C_SCL_PIN, (unsigned long)I2C_CLOCK_HZ);
+  Serial.printf("SD SPI SCK=%d MISO=%d MOSI=%d CS=%d\n", SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  Serial.printf("Buttons UP=%d DOWN=%d SELECT=%d active_low=1\n", BUTTON_UP, BUTTON_DOWN, BUTTON_SELECT);
+  Serial.printf("PN532 IRQ=%d RESET=%d\n", PN532_IRQ, PN532_RESET);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  Wire.setClock(I2C_CLOCK_HZ);
   delay(2000);
 
   pinMode(BUTTON_UP,     INPUT_PULLUP);
@@ -1642,6 +2330,10 @@ void setup() {
 
   String fw   = "FW: " + String((ver >> 16) & 0xFF) + "." + String((ver >> 8) & 0xFF);
   String chip = "Chip: PN5" + String((ver >> 24) & 0xFF, HEX);
+  Serial.printf("PN532 ready chip=PN5%02lX fw=%lu.%lu\n",
+                (unsigned long)((ver >> 24) & 0xFF),
+                (unsigned long)((ver >> 16) & 0xFF),
+                (unsigned long)((ver >> 8) & 0xFF));
   displayInfo("PN532 Ready", chip, fw);
   delay(1500);
 
@@ -1653,7 +2345,7 @@ void setup() {
   keyMap.crackedCount = 0;
   keyMap.numSectors   = 0;
 
-  displayMenuScreen("CYPHER NFC", mainMenuItems, mainMenuCount, 0);
+  displayMenuScreen(APP_DISPLAY_NAME, mainMenuItems, mainMenuCount, 0);
 }
 
 void loop() {

@@ -13,10 +13,11 @@ This project provides a comprehensive, handheld NFC/RFID toolkit built on the ES
 
 ### Core Scanning
 - **Scan & Info**: Automatic card type detection (MIFARE Classic 1K/4K, NTAG213/215/216, Ultralight). Displays UID, card type, and capacity.
+- **Demo Mode**: Show-friendly workflows for Tag Studio, Dump + Web, Badge Writer, and Puzzle Hunt without hiding the deeper research tools.
 
 ### Read Operations
 - **UID Only**: Quick card UID capture
-- **Read NDEF**: Extract and display NDEF-formatted messages from NTAG cards
+- **Read NDEF**: Extract and decode human-friendly URL/Text NDEF records from NTAG cards, with raw page view fallback.
 - **Full MIFARE Dump**: Complete 1K or 4K block dump with automatic key discovery via 50-key dictionary attack. Outputs binary (`.mfd`) + text (`.txt`) files to SD card.
 - **Full NTAG Dump**: All pages (45–231 depending on model). Outputs binary (`.bin`) + text (`.txt`) to SD card.
 
@@ -31,28 +32,42 @@ This project provides a comprehensive, handheld NFC/RFID toolkit built on the ES
 ### Writing
 - **Write NDEF URL**: Write `http://`, `https://`, `http://www.`, or `https://www.` URLs to NTAG cards.
 - **Write NDEF Text**: Write language-tagged text to NTAG cards.
-- **Write from SD**: (Placeholder for future expansion)
+- **Write from SD**: Select a `.txt` preset; files beginning with `url:` write URI records, files beginning with `text:` write text records, and bare content writes text.
 
 ### SD Card Tools
 - **Browse Files**: Navigate SD card directory (displays via scrolling list).
 - **Hex View File**: Open any file → navigate with UP/DOWN buttons → view 16-byte rows with hex + ASCII columns.
 - **Delete File**: Remove files from SD card.
+- **SD Web Server**: Start a read-only Wi-Fi AP at `http://192.168.4.1` for browsing, previewing, and downloading `/cypher-pn532/` files.
+
+### Card Emulation (Emulate Tag)
+- **NDEF from SD**: Emulate an NTAG-style Type 2 tag serving the `/NDEF_URL.TXT` / `/NDEF_TXT.TXT` preset — tap a phone to read it back. Great for "event badge backup" demos.
+- **NTAG Dump**: Replay a previously saved `ntgNNN.bin` dump as an emulated tag.
+- **UID Only**: Spoof a scanned UID with an empty NDEF body.
+- ⚠️ **Limits**: MIFARE Classic emulation is **not possible** (the PN532 can't run Crypto1 auth as a target — `.mfd` dumps can't be replayed to a reader). Only ~3 UID bytes are controllable, and cheap antennas radiate weakly in target mode, so tap the phone directly (iPhone is most reliable).
 
 ### Supporting Features
 - **Unique file naming**: Persistent `/COUNTER.TXT` on SD auto-increments filenames (`dmp001.mfd`, `dmp002.mfd`, `ntg001.bin`, etc.)
+- **Scan log CSV**: Appends `uptime_ms,uid,type,action,filename` to `SCANLOG.CSV` for scans, NDEF reads, writes, demo actions, and dumps.
 - **Progress feedback**: Long operations (dumps, dictionary attacks) show real-time progress bars
 - **Card type auto-detection**: Identifies MIFARE Classic vs NTAG variants via UID length and capability container inspection
 
 ## Menu Structure
 
-The device uses a 6-item main menu with context-sensitive submenus:
+The ESP32-C3 sketch uses an 8-item main menu. The Cardputer port adds `SD Web Server` and `Return to Cypher OS`, making it a 10-item main menu.
 
 ```
 MAIN MENU
 ├─ Scan & Info              → Auto-detect + display card info
+├─ Demo Mode
+│  ├─ Tag Studio            → Scan + decoded NDEF demo view
+│  ├─ Dump + Web            → Dump to SD; Cardputer can launch web browser
+│  ├─ Badge Writer          → Pick SD preset and write URL/Text NDEF
+│  ├─ Puzzle Hunt           → Show clue:/puzzle: NDEF text cleanly
+│  └─ Back
 ├─ Read Card
 │  ├─ UID Only
-│  ├─ Read NDEF
+│  ├─ Read NDEF             → Decoded URL/Text first, raw pages as fallback
 │  ├─ Full Dump MIFARE      → Auto key discovery + save
 │  ├─ Full Dump NTAG        → All pages + save
 │  └─ Back
@@ -67,13 +82,19 @@ MAIN MENU
 ├─ Write Card
 │  ├─ Write NDEF URL        → Select URL prefix + write
 │  ├─ Write NDEF Text       → Select text + write
-│  ├─ Write from SD         → (Reserved for future)
+│  ├─ Write from SD         → `url:` / `text:` presets
 │  └─ Back
-└─ SD Card
-   ├─ Browse Files          → Navigate + view filenames
-   ├─ Hex View File         → Open + scroll hex+ASCII
-   ├─ Delete File           → Select + confirm delete
+├─ SD Card
+│  ├─ Browse Files          → Navigate + view filenames
+│  ├─ Hex View File         → Open + scroll hex+ASCII
+│  ├─ Delete File           → Select + confirm delete
+│  └─ Back
+└─ Emulate Tag
+   ├─ NDEF from SD          → Serve SD NDEF preset to a phone (Type 2)
+   ├─ NTAG Dump             → Replay a saved ntgNNN.bin dump
+   ├─ UID Only              → Spoof a scanned UID, empty NDEF
    └─ Back
+SD Web Server               → Read-only AP file browser (Cardputer)
 ```
 
 **Navigation:** UP/DOWN buttons scroll menu items. SELECT button chooses item or confirms action. "Back" item returns to previous menu.
@@ -107,10 +128,49 @@ Cardputer EXT wiring:
 Leave PN532 `RESET`, `INT`, and `BUSY` unconnected. Do not use EXT pin 2
 `5VIN` to power the module.
 
+If the PN532 is missing or temporarily wedged, the Cardputer build now opens
+the menu instead of blocking at boot. NFC actions show a retry prompt, recover
+the EXT I2C bus, and return to the menu if the reader still does not answer.
+If repeated retries fail after a frozen read, physically power-cycle the PN532
+module or the Cardputer so the module loses 5V power.
+
 Cardputer runtime files live under `/cypher-pn532/` on the SD card. Optional
 NDEF presets can be placed at `/cypher-pn532/NDEF_URL.TXT` and
 `/cypher-pn532/NDEF_TXT.TXT`; the port also falls back to root-level preset
 files for compatibility with the original sketch.
+
+The Cardputer port also includes a read-only SD web server. Choose
+`SD Web Server` from the app menu, connect to SSID `CYPHER-PN532` with password
+`cypher532`, then open `http://192.168.4.1`. The browser can list, preview, and
+download files under `/cypher-pn532/`; it cannot upload, edit, delete, clone, or
+write NFC data. `/api/files` stays read-only and returns `name`, `size`, `type`,
+plus additive `view_url` and `download_url` fields.
+
+### Cypherbox Mini PN532 Port
+
+This repo now includes an isolated Cypherbox Mini profile at
+`CypherboxMiniPN532/CypherboxMiniPN532.ino`. It reuses the main NFC firmware
+with the Cypherbox Mini pin map and leaves the original ESP32-C3 sketch intact.
+
+Build it with Arduino CLI:
+
+```bash
+arduino-cli compile --profile cypherbox_mini CypherboxMiniPN532
+```
+
+Cypherbox Mini hardware contract:
+
+| Function | GPIO |
+| --- | --- |
+| I2C SDA for OLED + PN532 | `8` |
+| I2C SCL for OLED + PN532 | `9` |
+| PN532 IRQ / RESET | not connected, code uses `-1` |
+| SD SCK / MISO / MOSI / CS | `4` / `5` / `6` / `10` |
+| Buttons UP / DOWN / SELECT | `1` / `2` / `3` |
+
+Set the PN532 module DIP switches for I2C mode. Runtime files and optional
+NDEF presets stay at the SD root, matching the ESP32-C3 firmware:
+`/COUNTER.TXT`, `/SCANLOG.CSV`, `/NDEF_URL.TXT`, and `/NDEF_TXT.TXT`.
 
 ### Requirements
 - **Arduino IDE 2.x** (https://www.arduino.cc/en/software)
@@ -133,6 +193,17 @@ files for compatibility with the original sketch.
 9. **Flash**: Sketch → Upload
 10. **Monitor** (optional): Tools → Serial Monitor (set to 115200 baud)
 
+Arduino CLI compile check:
+
+```bash
+arduino-cli compile --fqbn 'esp32:esp32:XIAO_ESP32C3:CDCOnBoot=cdc' cypher_pn532
+arduino-cli compile --profile cypherbox_mini CypherboxMiniPN532
+```
+
+On the current ESP32 Arduino core, the bare `esp32:esp32:XIAO_ESP32C3` CLI FQBN
+can link-fail on `HWCDCSerial`; adding `CDCOnBoot=cdc` matches the compile-ready
+configuration used for validation.
+
 ### On First Boot
 - Device will initialize PN532 module and SD card
 - Display will show "Cypher NFC v2.0" splash screen
@@ -148,12 +219,14 @@ All dumps saved to SD card root directory with auto-incremented counters.
 | MIFARE Dump (Text) | `.txt` | Hex sector headers + per-block hex/ASCII | Human-readable reference |
 | NTAG Dump (Binary) | `.bin` | Raw pages (45–231 pages × 4 bytes) | Backup/restore format |
 | NTAG Dump (Text) | `.txt` | Hex page headers + hex/ASCII | Human-readable reference |
+| Scan Log | `.CSV` | `uptime_ms,uid,type,action,filename` | Field/demo activity log |
 | Counter | `COUNTER.TXT` | Plain text number | Auto-managed; do not edit |
 
 **Example filenames:**
 - `dmp001.mfd` / `dmp001.txt` — First MIFARE dump (1K or 4K, files paired)
 - `dmp002.mfd` / `dmp002.txt` — Second MIFARE dump
 - `ntg001.bin` / `ntg001.txt` — First NTAG dump
+- `SCANLOG.CSV` — Scan, write, dump, and demo activity
 - `COUNTER.TXT` — Current counter value (managed automatically)
 
 ## Parts List
@@ -293,4 +366,3 @@ Key improvements in v2.0:
 <img src="img/img7.JPG" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img8.JPG" alt="RFID/NFC Module" width="500" height="600">
 <img src="img/img5.JPG" alt="RFID/NFC Module" width="500" height="600">
-

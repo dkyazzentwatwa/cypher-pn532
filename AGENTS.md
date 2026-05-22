@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -66,35 +66,8 @@ CYPHER NFC (main)
 ├── Key Attack        → Dictionary Attack (50-key table vs Key A+B per sector)
 ├── Clone Card        → Dump to SD / SD to Magic Card / Verify Clone
 ├── Write Card        → Write NDEF URL / Write NDEF Text / Write from SD
-├── SD Card           → Browse Files / Hex View File / Delete File
-└── Emulate Tag       → NDEF from SD / NTAG Dump / UID Only
+└── SD Card           → Browse Files / Hex View File / Delete File
 ```
-
-### Card Emulation (Emulate Tag)
-
-The PN532 acts as an ISO14443A **target** (`TgInitAsTarget` 0x8C / `TgGetData`
-0x86 / `TgSetData` 0x8E), presenting an NTAG-style **Type 2** tag that a phone
-reads as NDEF — for "event badge backup" demos. Three sources build the page
-image (`emuPageImage`, page 3 = CC `E1 10 12 00`, pages 4+ = NDEF TLV):
-
-- **NDEF from SD** — `/NDEF_URL.TXT` or `/NDEF_TXT.TXT` via `buildNDEFMessage()`.
-- **NTAG Dump** — replays a saved `ntgNNN.bin` (sequential 4-byte pages).
-- **UID Only** — spoofs the scanned UID with an empty NDEF body.
-
-`runType2Emulation()` loops until SELECT/Back, answering Type 2 READ (0x30).
-
-**Hard limits (do not work around):**
-- **No MIFARE Classic emulation** — the PN532 firmware can't run Crypto1
-  authentication as a target, so `.mfd` dumps cannot be replayed to a reader.
-- Only 3 NFCID1 bytes are controllable, so the RF UID is a best-effort spoof.
-- Cheap PN532 antennas radiate weakly in target mode; tap the phone directly.
-  iPhone is the most reliable reader.
-
-The ESP32-C3 build talks to the chip with standalone raw-I2C frame helpers
-(`pn532_sendCmd` / `pn532_readResp`) since `Adafruit_PN532::readdata` is private;
-the Cardputer build adds `tgInitAsTarget`/`tgGetData`/`tgSetData` to its own
-`M5Pn532` driver class. `CypherboxMiniPN532` `#include`s the C3 source, so it
-inherits the feature.
 
 ### Key Global Data Structures
 
