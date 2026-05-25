@@ -3,10 +3,10 @@
 
 <img src="img/img6.JPG" alt="RFID/NFC Module" width="500" height="600">
 
-This project provides a comprehensive, handheld NFC/RFID toolkit built on the ESP32-C3 Super Mini with PN532 chipset. **v2.0 is a complete rewrite** featuring proper state machines, card type auto-detection, full MIFARE Classic and NTAG dumps, dictionary attacks, magic card cloning, NDEF writing, and a hex file viewer.
+This project provides a comprehensive, handheld NFC/RFID toolkit built on the ESP32-C3 Super Mini with PN532 chipset. **v2.0 is an open PN532 field workstation** featuring proper state machines, card type auto-detection, full MIFARE Classic and NTAG dumps, dictionary attacks, magic card cloning, NDEF writing, Type 4 NDEF emulation, a safe APDU lab, USB/BLE serial control, no-auth Web Control mode, JSON sidecar artifacts, and a hex file viewer.
 
 - **Handheld device**: ESP32-C3 Super Mini + SSD1306 128x64 OLED + SD card module + PN532 RFID/NFC + 3-button UI
-- **Professional-grade NFC capabilities**: Not a toy—this is a working toolkit for NFC research, pentesting, and card forensics
+- **Open field workstation**: Device UI, USB/BLE CLI, SD artifacts, and browser controls for authorized NFC lab work
 - **Fully open-source**: Schematics and PCB files available; create your own via PCBWay! https://pcbway.com/g/87Pi52
 
 ## Current Features (v2.0)
@@ -22,7 +22,7 @@ This project provides a comprehensive, handheld NFC/RFID toolkit built on the ES
 - **Full NTAG Dump**: All pages (45–231 depending on model). Outputs binary (`.bin`) + text (`.txt`) to SD card.
 
 ### Key Recovery & Attacks
-- **Dictionary Attack**: Test 50 common MIFARE Classic keys (factory defaults, transport, access control) against all sectors. Displays per-sector cracked status (sector key map grid).
+- **Dictionary Attack / Key Audit**: Test 50 built-in MIFARE Classic keys plus optional SD keys from `KEYS.TXT` against all sectors. Displays per-sector cracked status and saves key-map artifacts.
 
 ### Cloning
 - **Dump to SD**: Scan source card → full dump with key discovery → save to SD.
@@ -38,23 +38,31 @@ This project provides a comprehensive, handheld NFC/RFID toolkit built on the ES
 - **Browse Files**: Navigate SD card directory (displays via scrolling list).
 - **Hex View File**: Open any file → navigate with UP/DOWN buttons → view 16-byte rows with hex + ASCII columns.
 - **Delete File**: Remove files from SD card.
-- **SD Web Server**: Start a read-only Wi-Fi AP at `http://192.168.4.1` for browsing, previewing, and downloading `/cypher-pn532/` files.
+- **Web Control Mode**: Start a no-auth Wi-Fi AP at `http://192.168.4.1` for full control: scan, dump, key-audit, write, clone, verify, preset edit, delete, preview, and download.
+- **BLE Serial Mode**: Menu-launched no-auth Nordic UART Service as `CYPHER-PN532`, mirroring the USB command protocol for nearby lab control.
 
 ### Card Emulation (Emulate Tag)
-- **NDEF from SD**: Emulate an NTAG-style Type 2 tag serving the `/NDEF_URL.TXT` / `/NDEF_TXT.TXT` preset — tap a phone to read it back. Great for "event badge backup" demos.
+- **NDEF from SD**: Emulate an ISO14443-4 / Type 4 NDEF tag serving `/ndef/*.txt`, `/NDEF_URL.TXT`, or `/NDEF_TXT.TXT` content. This is the iPhone-friendly path for event badge / handoff demos.
 - **NTAG Dump**: Replay a previously saved `ntgNNN.bin` dump as an emulated tag.
 - **UID Only**: Spoof a scanned UID with an empty NDEF body.
 - ⚠️ **Limits**: MIFARE Classic emulation is **not possible** (the PN532 can't run Crypto1 auth as a target — `.mfd` dumps can't be replayed to a reader). Only ~3 UID bytes are controllable, and cheap antennas radiate weakly in target mode, so tap the phone directly (iPhone is most reliable).
 
+### APDU Lab
+- **Type4 NDEF Probe**: Read-only ISO7816/ISO14443-4 probe that selects the NFC Forum NDEF application, reads the CC file, selects the NDEF file, and shows NLEN plus the first bytes.
+- **Select NDEF AID**: Sends only the NFC Forum NDEF AID select APDU and displays response length plus SW1/SW2 status words.
+- **Scope**: This is for safe educational Type 4/NDEF testing. It does not include payment AID presets or generic payment-card processing.
+
 ### Supporting Features
 - **Unique file naming**: Persistent `/COUNTER.TXT` on SD auto-increments filenames (`dmp001.mfd`, `dmp002.mfd`, `ntg001.bin`, etc.)
-- **Scan log CSV**: Appends `uptime_ms,uid,type,action,filename` to `SCANLOG.CSV` for scans, NDEF reads, writes, demo actions, and dumps.
+- **Scan log CSV**: Appends `uptime_ms,uid,type,action,filename` to `SCANLOG.CSV` for scans, NDEF reads, writes, web/USB/BLE operations, demo actions, and dumps.
+- **JSON sidecars**: Dumps and key audits create `.json` metadata with schema version, device, firmware, UID, card type, capacity, files, and key summary.
+- **USB serial control**: `tools/cypher_pn532_cli.py` exposes `help`, `status`, `scan`, `dump`, `key-audit`, `write-ndef`, `write-from-sd`, `clone`, `verify`, `files`, `download`, `upload-preset`, `delete`, and `emulate-ndef`.
 - **Progress feedback**: Long operations (dumps, dictionary attacks) show real-time progress bars
 - **Card type auto-detection**: Identifies MIFARE Classic vs NTAG variants via UID length and capability container inspection
 
 ## Menu Structure
 
-The ESP32-C3 sketch uses an 8-item main menu. The Cardputer port adds `SD Web Server` and `Return to Cypher OS`, making it a 10-item main menu.
+The ESP32-C3 and Cypherbox Mini builds include `Web Control` and `BLE Serial`. The Cardputer port adds `Web Control`, `BLE Serial`, and `Return to Cypher OS`, making it a 12-item main menu.
 
 ```
 MAIN MENU
@@ -89,12 +97,18 @@ MAIN MENU
 │  ├─ Hex View File         → Open + scroll hex+ASCII
 │  ├─ Delete File           → Select + confirm delete
 │  └─ Back
-└─ Emulate Tag
-   ├─ NDEF from SD          → Serve SD NDEF preset to a phone (Type 2)
-   ├─ NTAG Dump             → Replay a saved ntgNNN.bin dump
-   ├─ UID Only              → Spoof a scanned UID, empty NDEF
-   └─ Back
-SD Web Server               → Read-only AP file browser (Cardputer)
+├─ Emulate Tag
+│  ├─ NDEF from SD          → Serve SD NDEF preset to a phone (Type 4)
+│  ├─ NTAG Dump             → Replay a saved ntgNNN.bin dump
+│  ├─ UID Only              → Spoof a scanned UID, empty NDEF
+│  └─ Back
+├─ APDU Lab
+│  ├─ Type4 NDEF Probe      → Safe read-only CC/NLEN probe
+│  ├─ Select NDEF AID       → Show ISO7816 status words
+│  └─ Back
+├─ Web Control              → No-auth AP control surface
+├─ BLE Serial               → No-auth Nordic UART command surface
+└─ Return to Cypher OS      → Launcher return helper (Cardputer)
 ```
 
 **Navigation:** UP/DOWN buttons scroll menu items. SELECT button chooses item or confirms action. "Back" item returns to previous menu.
@@ -137,14 +151,21 @@ module or the Cardputer so the module loses 5V power.
 Cardputer runtime files live under `/cypher-pn532/` on the SD card. Optional
 NDEF presets can be placed at `/cypher-pn532/NDEF_URL.TXT` and
 `/cypher-pn532/NDEF_TXT.TXT`; the port also falls back to root-level preset
-files for compatibility with the original sketch.
+files for compatibility with the original sketch. Type 4 emulation first looks
+for selectable payloads in `/cypher-pn532/ndef/*.txt`, then falls back to those
+preset files.
 
-The Cardputer port also includes a read-only SD web server. Choose
-`SD Web Server` from the app menu, connect to SSID `CYPHER-PN532` with password
-`cypher532`, then open `http://192.168.4.1`. The browser can list, preview, and
-download files under `/cypher-pn532/`; it cannot upload, edit, delete, clone, or
-write NFC data. `/api/files` stays read-only and returns `name`, `size`, `type`,
-plus additive `view_url` and `download_url` fields.
+The Cardputer port also includes Web Control and BLE Serial modes. Choose `Web Control` from
+the app menu, connect to SSID `CYPHER-PN532` with password `cypher532`, then
+open `http://192.168.4.1`. The browser can run full workstation operations
+against `/cypher-pn532/`: scan, dump, key-audit, write NDEF, write from SD,
+clone, verify, emulate NDEF, edit presets, delete files, preview, and download.
+The AP has no HTTP auth by design, so launch it only in a trusted lab setting.
+`/api/files` returns `name`, `size`, `type`, `view_url`, and `download_url`;
+`POST /api/op` runs the same foreground operations as the device UI and USB CLI.
+Choose `BLE Serial` to advertise `CYPHER-PN532` over Nordic UART Service until
+Back/Select exits the mode. BLE uses the same commands and JSON responses as USB,
+has no pairing or app auth, and can run destructive write/clone/delete operations.
 
 ### Cypherbox Mini PN532 Port
 
@@ -171,6 +192,8 @@ Cypherbox Mini hardware contract:
 Set the PN532 module DIP switches for I2C mode. Runtime files and optional
 NDEF presets stay at the SD root, matching the ESP32-C3 firmware:
 `/COUNTER.TXT`, `/SCANLOG.CSV`, `/NDEF_URL.TXT`, and `/NDEF_TXT.TXT`.
+Type 4 emulation also checks `/ndef/*.txt` before falling back to root `.txt`
+files and then the preset files.
 
 ### Requirements
 - **Arduino IDE 2.x** (https://www.arduino.cc/en/software)
@@ -196,13 +219,46 @@ NDEF presets stay at the SD root, matching the ESP32-C3 firmware:
 Arduino CLI compile check:
 
 ```bash
-arduino-cli compile --fqbn 'esp32:esp32:XIAO_ESP32C3:CDCOnBoot=cdc' cypher_pn532
+arduino-cli compile --fqbn 'esp32:esp32:XIAO_ESP32C3:CDCOnBoot=cdc,PartitionScheme=huge_app' cypher_pn532
 arduino-cli compile --profile cypherbox_mini CypherboxMiniPN532
 ```
 
 On the current ESP32 Arduino core, the bare `esp32:esp32:XIAO_ESP32C3` CLI FQBN
-can link-fail on `HWCDCSerial`; adding `CDCOnBoot=cdc` matches the compile-ready
-configuration used for validation.
+can link-fail on `HWCDCSerial`; adding `CDCOnBoot=cdc` matches the serial-ready
+configuration used for validation. NimBLE also requires the ESP32-C3/Cypherbox
+builds to use `PartitionScheme=huge_app`.
+
+## USB and BLE Serial Workstation Control
+
+The firmware accepts newline-delimited USB serial commands at 115200 baud, and
+the menu-launched `BLE Serial` mode exposes the same command language through
+Nordic UART Service. Arguments use `key=value` tokens with percent-encoded
+values, and responses are newline-delimited JSON. The supported operations are:
+
+`HELP`, `STATUS`, `SCAN`, `DUMP`, `KEY_AUDIT`, `WRITE_NDEF`, `WRITE_FROM_SD`,
+`CLONE`, `VERIFY`, `FILES`, `GET_FILE`, `PUT_PRESET`, `DELETE`, and
+`EMULATE_NDEF`.
+
+BLE advertises as `CYPHER-PN532` only while the device is in BLE Serial mode.
+It is no-auth proximity lab access and mirrors USB exactly, including the hex
+chunk stream used by `GET_FILE`.
+
+Use the host helper:
+
+```bash
+python3 tools/cypher_pn532_cli.py --self-test
+python3 tools/cypher_pn532_cli.py --port /dev/cu.usbmodem3101 help
+python3 tools/cypher_pn532_cli.py --port /dev/cu.usbmodem3101 status
+python3 tools/cypher_pn532_cli.py --port /dev/cu.usbmodem3101 scan
+python3 tools/cypher_pn532_cli.py --port /dev/cu.usbmodem3101 write-ndef --type url --content https://example.com
+python3 tools/cypher_pn532_cli.py --port /dev/cu.usbmodem3101 download SCANLOG.CSV -o SCANLOG.CSV
+```
+
+Install `pyserial` if needed:
+
+```bash
+python3 -m pip install pyserial
+```
 
 ### On First Boot
 - Device will initialize PN532 module and SD card
@@ -219,6 +275,8 @@ All dumps saved to SD card root directory with auto-incremented counters.
 | MIFARE Dump (Text) | `.txt` | Hex sector headers + per-block hex/ASCII | Human-readable reference |
 | NTAG Dump (Binary) | `.bin` | Raw pages (45–231 pages × 4 bytes) | Backup/restore format |
 | NTAG Dump (Text) | `.txt` | Hex page headers + hex/ASCII | Human-readable reference |
+| Metadata sidecar | `.json` | Device, firmware, UID, card type, files, key summary | Created for dumps/key audits |
+| Key dictionary | `KEYS.TXT` | One 6-byte hex key per line | Optional extra MIFARE keys after built-ins |
 | Scan Log | `.CSV` | `uptime_ms,uid,type,action,filename` | Field/demo activity log |
 | Counter | `COUNTER.TXT` | Plain text number | Auto-managed; do not edit |
 
@@ -226,6 +284,8 @@ All dumps saved to SD card root directory with auto-incremented counters.
 - `dmp001.mfd` / `dmp001.txt` — First MIFARE dump (1K or 4K, files paired)
 - `dmp002.mfd` / `dmp002.txt` — Second MIFARE dump
 - `ntg001.bin` / `ntg001.txt` — First NTAG dump
+- `dmp001.json` / `ntg001.json` — Metadata sidecar for a saved dump
+- `KEYS.TXT` — Optional user key dictionary (`FFFFFFFFFFFF`, `A0:A1:A2:A3:A4:A5`, etc.)
 - `SCANLOG.CSV` — Scan, write, dump, and demo activity
 - `COUNTER.TXT` — Current counter value (managed automatically)
 
@@ -296,11 +356,13 @@ Failure to rewire will cause conflicts with the PN532 hardware pins.
 ### Card Type Auto-Detection
 - **MIFARE Classic 1K vs 4K**: Detected via UID length (4 bytes) + block 128 probing
 - **NTAG vs Ultralight**: Detected via capability container byte at page 3 (CC field)
+- **Type 4 NDEF**: Cards that do not answer MIFARE/NTAG-specific reads are probed with a read-only NFC Forum NDEF AID SELECT APDU.
 - **Full type support**: MIFARE Classic, NTAG213/215/216, MIFARE Ultralight, ISO14443-4
 
 ### Dictionary Attack Algorithm
 - Embeds 50 most common MIFARE keys (factory defaults, transport, vendor keys)
-- Tests Key A + Key B per sector (~64 keys × 32 sectors for 1K = ~2000 auth attempts)
+- Merges optional SD keys from `KEYS.TXT` after the built-in dictionary
+- Tests Key A + Key B per sector
 - Shows live per-sector progress; completes ~30 seconds for typical 1K card
 - Caches discovered keys for efficient block reading
 
@@ -328,7 +390,8 @@ Failure to rewire will cause conflicts with the PN532 hardware pins.
 ## Compatibility & Limitations
 
 - **Supported cards**: ISO14443A (Type 2 & Type 4) — MIFARE, NTAG, Ultralight
-- **Not supported**: HF ISO14443B, ISO15693, FeliCa, other 13.56MHz standards
+- **Not supported without different hardware**: RF sniffing, MIFARE Classic target emulation, ISO15693/ICODE, EM4100/125 kHz LF, Mfkey32/Mfkey64-style workflows that require sniffing, HF ISO14443B, FeliCa, and other non-PN532-supported standards
+- **APDU Lab scope**: Read-only Type 4/NDEF APDUs only; no payment AID presets. Apple's `NFCPaymentTagReaderSession` is a separate, EU-gated iOS API and does not change what the PN532 firmware can do directly.
 - **Magic card cloning**: Only Gen1a backdoor method; Gen2/CUID requires alternate approach (not implemented)
 - **NDEF writing**: URL/Text only; nested NDEF messages not supported
 - **Encryption**: MIFARE DES/3DES authentication is symmetric (no real encryption); key recovery is the point

@@ -8,3 +8,4 @@ profiles:
       - M5Cardputer (1.1.1)
       - M5Unified (0.2.14)
       - M5GFX (0.2.20)
+      - NimBLE-Arduino (2.5.0)
