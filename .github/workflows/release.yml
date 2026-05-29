@@ -1,9 +1,9 @@
 name: Release firmware
 
-# Builds each board with arduino-cli and attaches the merged factory bin to the
-# GitHub Release for the pushed tag. Platform/libs/FQBN are read from sketch.yaml
-# (single source of truth); custom libs are vendored under ./libraries and picked
-# up via --libraries (profiles can't reference local libs, so we build by FQBN).
+# FQBN-based build (so vendored ./libraries are picked up; profiles can't use
+# --libraries). Platform/libs/FQBN are read from each sketch's sketch.yaml.
+# Library display names can contain spaces (e.g. "Adafruit PN532"), so libs are
+# installed one-per-line.
 
 on:
   push:
@@ -30,9 +30,6 @@ jobs:
           - profile: cypherbox_mini
             sketch: "CypherboxMiniPN532"
             asset: cypher-pn532-cypherbox-mini-xiao-c3.merged.bin
-          - profile: devkitc
-            sketch: "cypher-pn7160"
-            asset: cypher-pn532-esp32-devkitc-pn7160.merged.bin
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,51 +46,54 @@ jobs:
         id: prof
         run: |
           python3 -c "import yaml" 2>/dev/null || sudo apt-get install -y python3-yaml
-          python3 - "${{ matrix.sketch }}" "${{ matrix.profile }}" >> "$GITHUB_OUTPUT" <<'PY'
+          python3 - "${{ matrix.sketch }}" "${{ matrix.profile }}" <<'PY'
           import sys, os, yaml
           sketch, profile = sys.argv[1], sys.argv[2]
           p = yaml.safe_load(open(os.path.join(sketch, "sketch.yaml")))["profiles"][profile]
-          def conv(lib):
-              lib = lib.strip()
-              if "(" in lib:
-                  n, v = lib.split("(", 1)
+          def conv(s):
+              s = s.strip()
+              if "(" in s:
+                  n, v = s.split("(", 1)
                   return f"{n.strip()}@{v.strip(') ').strip()}"
-              return lib
+              return s
           urls = ",".join(pl.get("platform_index_url", "") for pl in p.get("platforms", []) if pl.get("platform_index_url"))
-          print("fqbn=" + p["fqbn"])
-          print("urls=" + urls)
-          print("plats=" + " ".join(pl["platform"] for pl in p.get("platforms", [])))
-          print("libs=" + " ".join(conv(l) for l in p.get("libraries", [])))
+          plats = " ".join(conv(pl["platform"]) for pl in p.get("platforms", []))
+          out = open(os.environ["GITHUB_OUTPUT"], "a")
+          out.write(f"fqbn={p['fqbn']}\n")
+          out.write(f"urls={urls}\n")
+          out.write(f"plats={plats}\n")
+          # Library display names may contain spaces -> write one per line.
+          with open(os.path.join(sketch, "arduino_libs.txt"), "w") as lf:
+              for l in p.get("libraries", []):
+                  lf.write(conv(l) + "\n")
           PY
 
       - name: Install platform + libraries
         run: |
+          cd "${{ matrix.sketch }}"
           URLS="${{ steps.prof.outputs.urls }}"
           ADD=""
           [ -n "$URLS" ] && ADD="--additional-urls $URLS"
           arduino-cli core update-index $ADD
           arduino-cli core install ${{ steps.prof.outputs.plats }} $ADD
-          if [ -n "${{ steps.prof.outputs.libs }}" ]; then
-            arduino-cli lib install ${{ steps.prof.outputs.libs }}
-          fi
+          while IFS= read -r lib; do
+            [ -n "$lib" ] && arduino-cli lib install "$lib"
+          done < arduino_libs.txt
 
       - name: Compile ${{ matrix.profile }}
         run: |
+          cd "${{ matrix.sketch }}"
           LIBARG=""
-          [ -d "${{ matrix.sketch }}/libraries" ] && LIBARG="--libraries ${{ matrix.sketch }}/libraries"
+          [ -d libraries ] && LIBARG="--libraries libraries"
           rm -rf build_out
-          arduino-cli compile \
-            --fqbn "${{ steps.prof.outputs.fqbn }}" \
-            $LIBARG \
-            --output-dir build_out \
-            "${{ matrix.sketch }}"
+          arduino-cli compile --fqbn "${{ steps.prof.outputs.fqbn }}" $LIBARG --output-dir build_out .
 
       - name: Collect merged binary
         run: |
-          merged="$(ls build_out/*.merged.bin 2>/dev/null | head -1)"
+          merged="$(ls "${{ matrix.sketch }}"/build_out/*.merged.bin 2>/dev/null | head -1)"
           if [ -z "$merged" ]; then
-            echo "::error::No *.merged.bin produced. build_out contents:"
-            ls -R build_out
+            echo "::error::No *.merged.bin produced."
+            ls -R "${{ matrix.sketch }}/build_out" || true
             exit 1
           fi
           cp "$merged" "${{ matrix.asset }}"
