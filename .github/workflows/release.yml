@@ -1,0 +1,107 @@
+name: Release firmware
+
+# Builds each board with arduino-cli and attaches the merged factory bin to the
+# GitHub Release for the pushed tag. Platform/libs/FQBN are read from sketch.yaml
+# (single source of truth); custom libs are vendored under ./libraries and picked
+# up via --libraries (profiles can't reference local libs, so we build by FQBN).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to attach assets to (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: adv
+            sketch: "CardputerPN532"
+            asset: cypher-pn532-cardputer-adv.merged.bin
+          - profile: cypherbox_mini
+            sketch: "CypherboxMiniPN532"
+            asset: cypher-pn532-cypherbox-mini-xiao-c3.merged.bin
+          - profile: devkitc
+            sketch: "cypher-pn7160"
+            asset: cypher-pn532-esp32-devkitc-pn7160.merged.bin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install arduino-cli
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh \
+            | BINDIR="$HOME/bin" sh
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve platform + libraries from sketch.yaml
+        id: prof
+        run: |
+          python3 -c "import yaml" 2>/dev/null || sudo apt-get install -y python3-yaml
+          python3 - "${{ matrix.sketch }}" "${{ matrix.profile }}" >> "$GITHUB_OUTPUT" <<'PY'
+          import sys, os, yaml
+          sketch, profile = sys.argv[1], sys.argv[2]
+          p = yaml.safe_load(open(os.path.join(sketch, "sketch.yaml")))["profiles"][profile]
+          def conv(lib):
+              lib = lib.strip()
+              if "(" in lib:
+                  n, v = lib.split("(", 1)
+                  return f"{n.strip()}@{v.strip(') ').strip()}"
+              return lib
+          urls = ",".join(pl.get("platform_index_url", "") for pl in p.get("platforms", []) if pl.get("platform_index_url"))
+          print("fqbn=" + p["fqbn"])
+          print("urls=" + urls)
+          print("plats=" + " ".join(pl["platform"] for pl in p.get("platforms", [])))
+          print("libs=" + " ".join(conv(l) for l in p.get("libraries", [])))
+          PY
+
+      - name: Install platform + libraries
+        run: |
+          URLS="${{ steps.prof.outputs.urls }}"
+          ADD=""
+          [ -n "$URLS" ] && ADD="--additional-urls $URLS"
+          arduino-cli core update-index $ADD
+          arduino-cli core install ${{ steps.prof.outputs.plats }} $ADD
+          if [ -n "${{ steps.prof.outputs.libs }}" ]; then
+            arduino-cli lib install ${{ steps.prof.outputs.libs }}
+          fi
+
+      - name: Compile ${{ matrix.profile }}
+        run: |
+          LIBARG=""
+          [ -d "${{ matrix.sketch }}/libraries" ] && LIBARG="--libraries ${{ matrix.sketch }}/libraries"
+          rm -rf build_out
+          arduino-cli compile \
+            --fqbn "${{ steps.prof.outputs.fqbn }}" \
+            $LIBARG \
+            --output-dir build_out \
+            "${{ matrix.sketch }}"
+
+      - name: Collect merged binary
+        run: |
+          merged="$(ls build_out/*.merged.bin 2>/dev/null | head -1)"
+          if [ -z "$merged" ]; then
+            echo "::error::No *.merged.bin produced. build_out contents:"
+            ls -R build_out
+            exit 1
+          fi
+          cp "$merged" "${{ matrix.asset }}"
+          ls -l "${{ matrix.asset }}"
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: ${{ matrix.asset }}
+          fail_on_unmatched_files: true
