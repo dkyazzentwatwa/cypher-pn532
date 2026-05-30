@@ -1,0 +1,8 @@
+profiles:
+  devkitc:
+    fqbn: esp32:esp32:esp32:PartitionScheme=huge_app,UploadSpeed=460800
+    platforms:
+      - platform: esp32:esp32
+        platform_index_url: https://espressif.github.io/arduino-esp32/package_esp32_index.json
+    libraries:
+      - Electronic Cats PN7150 (3.1.1)
