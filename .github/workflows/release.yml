@@ -30,6 +30,9 @@ jobs:
           - profile: cypherbox_mini
             sketch: "CypherboxMiniPN532"
             asset: cypher-pn532-cypherbox-mini-xiao-c3.merged.bin
+          - profile: devkitc
+            sketch: "cypher-pn7160"
+            asset: cypher-pn532-esp32-devkitc-pn7160.merged.bin
     steps:
       - uses: actions/checkout@v4
         with:
